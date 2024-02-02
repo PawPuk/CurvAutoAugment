@@ -1,47 +1,23 @@
 import numpy as np
-from torch.utils.data import Subset, ConcatDataset
-import torch
-import torchvision
-from tqdm import tqdm
 
-from utils import (calculate_accuracy, estimate_entanglement, plot_entanglements_and_accuracies,
-                   load_models_pretrained_on_cifar10)
+from utils import (estimate_entanglement, plot_entanglements_and_accuracies, load_models_pretrained_on_cifar10,
+                   load_dataset, compute_accuracies_on_classes, measure_correlation)
 
 
-seed = 42
 # Set random seed for reproducibility
+seed = 42
 np.random.seed(seed)
-# Download CIFAR-10 dataset
-normalize = torchvision.transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010])
-transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(), normalize, ])
-train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
-test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
-# Split the datasets into 10 subsets for each class
-train_class_indices = {i: [] for i in range(10)}
-test_class_indices = {i: [] for i in range(10)}
-splitted_train_dataset, splitted_test_dataset, splitted_full_dataset = {}, {}, {}
-for i, (image, label) in enumerate(train_dataset):
-    train_class_indices[label].append(i)
-for i, (image, label) in enumerate(test_dataset):
-    test_class_indices[label].append(i)
-for i in range(10):
-    splitted_train_dataset[i] = Subset(train_dataset, train_class_indices[i][:500])
-    splitted_test_dataset[i] = Subset(test_dataset, test_class_indices[i][:500])
-    splitted_full_dataset[i] = ConcatDataset((splitted_train_dataset[i], splitted_test_dataset[i]))
-# Estimate the entanglement of each class manifold
-entanglement = estimate_entanglement(splitted_full_dataset, 5)
+# Load the train set, test set, and the whole dataset. Split all into individual classes (dictionary with k keys)
+splitted_train_dataset, splitted_test_dataset, splitted_full_dataset = load_dataset(1500)
+# Estimate the entanglement of each of the k class manifolds using 3 different approaches
+hnn1_entanglement = estimate_entanglement(splitted_full_dataset, '1hnn', 2)
+hnn3_entanglement = estimate_entanglement(splitted_full_dataset, '3hnn', 2)
+lsvc_entanglement = estimate_entanglement(splitted_full_dataset, 'lsvc', 2)
 # Prepare a list of pretrained models
 models = load_models_pretrained_on_cifar10()
-class_accuracies = {}
-for i in range(len(splitted_test_dataset)):
-    class_accuracies[f'Class {i}'] = []
-for model in tqdm(models, desc='Measuring the class accuracies for different models'):
-    model.eval()
-    # Calculate accuracy on each class subset
-    for i in range(10):
-        class_accuracy = calculate_accuracy(splitted_test_dataset[i], model)
-        # class_accuracy = calculate_accuracy(splitted_full_dataset[i], model)
-        class_accuracies[f'Class {i}'].append(class_accuracy)
-print(entanglement)
-print(class_accuracies)
-plot_entanglements_and_accuracies(entanglement, class_accuracies)
+# Compute the accuracy of the models on the test set
+class_accuracies = compute_accuracies_on_classes(splitted_test_dataset, models)
+# Compare the estimates obtained via entanglement with actual class accuracies.
+measure_correlation((hnn1_entanglement, hnn3_entanglement, lsvc_entanglement), class_accuracies)
+plot_entanglements_and_accuracies((hnn1_entanglement, hnn3_entanglement, lsvc_entanglement),
+                                  class_accuracies)
