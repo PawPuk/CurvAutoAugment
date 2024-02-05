@@ -3,7 +3,7 @@ from typing import List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, Dataset, DataLoader
+from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
@@ -18,6 +18,30 @@ def load_data():
 
 def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size: int) -> Tuple[DataLoader, ...]:
     return tuple([DataLoader(dataset, batch_size=batch_size, shuffle=False) for dataset in list_of_datasets])
+
+
+def generate_spiral_data(n_points, noise=0.5):
+    """
+    Generates a 2D spiral dataset with two classes.
+    :param n_points: Number of points per class.
+    :param noise: Standard deviation of Gaussian noise added to the data.
+    :return: data (features), labels
+    """
+    n = np.sqrt(np.random.rand(n_points, 1)) * 780 * (1*np.pi)/360
+    d1x = -np.cos(n)*n + np.random.rand(n_points, 1) * noise
+    d1y = np.sin(n)*n + np.random.rand(n_points, 1) * noise
+    return (np.vstack((np.hstack((d1x, d1y)), np.hstack((-d1x, -d1y)))),
+            np.hstack((np.zeros(n_points), np.ones(n_points))))
+
+
+def create_spiral_data_loader(data, labels, batch_size=128):
+    # Convert the numpy arrays into torch tensors
+    data = torch.Tensor(data)
+    labels = torch.Tensor(labels).long()  # Labels should be of type Long
+    # Create TensorDataset objects
+    train_dataset = TensorDataset(data, labels)
+    # Create DataLoader objects
+    return DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
 
 
 def compute_radii(data, model):
@@ -93,3 +117,20 @@ def plot_radii(epoch_radii):
         ax.grid(True)
     plt.tight_layout()
     plt.show()
+
+
+def plot_spiral_data(data, labels, title='Spiral Data'):
+
+    """
+    Plots the 2D spiral data.
+    :param data: Features (data points).
+    :param labels: Corresponding labels for the data points.
+    :param title: Title for the plot.
+    """
+    plt.figure(figsize=(8, 8))
+    plt.scatter(data[:, 0], data[:, 1], c=labels, cmap=plt.cm.Spectral, s=25, edgecolor='k')
+    plt.title(title)
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.show()
+
