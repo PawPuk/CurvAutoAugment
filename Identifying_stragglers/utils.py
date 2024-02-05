@@ -3,13 +3,26 @@ from typing import List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
 
+PDATA = 8192  # number of elements in the data set
+DATA_BLOCK = 1  # Data block to use within the full data set
+EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
+tdDATASET = torchvision.datasets.MNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
+
+
 def load_data():
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
+    dataset = tdDATASET("data", train=True, download=True,
+                        transform=torchvision.transforms.ToTensor())
+    in_block = lambda n: (DATA_BLOCK - 1) * PDATA <= n < DATA_BLOCK * PDATA
+    data_means = torch.mean(torch.cat([a[0] for n, a in enumerate(dataset) if in_block(n)]), dim=0)
+    data_vars = torch.sqrt(torch.var(torch.cat([a[0] for n, a in enumerate(dataset) if in_block(n)]), dim=0))
+    transf = lambda x: (x - data_means) / (data_vars + EPSILON)
+    transform = transforms.Compose([transforms.ToTensor(), transf])
     train_dataset = datasets.MNIST(root="data", train=True, download=True, transform=transform)
     test_dataset = datasets.MNIST(root="data", train=False, download=True, transform=transform)
     full_dataset = ConcatDataset((train_dataset, test_dataset))
@@ -44,34 +57,9 @@ def create_spiral_data_loader(data, labels, batch_size=128):
     return DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
 
 
-def compute_radii(data, model):
-    model.eval()  # Set the model to evaluation mode
-    radii = {i: [] for i in range(10)}  # Dictionary to store radii of each class manifold
-    with torch.no_grad():  # No need to track gradients
-        for X, y in data:
-            if torch.cuda.is_available():
-                X, y = X.cuda(), y.cuda()
-            # Compute the pairwise distances for instances of the same class
-            for i in range(10):
-                class_mask = y == i
-                class_data = X[class_mask]
-                if len(class_data) > 1:  # At least 2 instances to compute distance
-                    distances = torch.cdist(class_data.view(class_data.size(0), -1),
-                                            class_data.view(class_data.size(0), -1), p=2)
-                    # We take the upper triangle of the distance matrix, excluding the diagonal
-                    upper_tri_distances = distances[np.triu_indices(distances.size(0), k=1)]
-                    # Calculate the radii and store them
-                    radii[i].append(torch.sqrt(torch.mean(upper_tri_distances ** 2)).item())
-                else:
-                    print(len(class_data))
-                    raise Exception('The manifold has no data samples.')
-    # Average the radii for this epoch
-    average_radii = {i: np.mean(radii[i]) if radii[i] else 0 for i in radii}
-    return average_radii
-
-
 def train_model(model, train_loader, optimizer, criterion, epochs):
     epoch_radii = []
+    error_radii = []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     for epoch in tqdm(range(epochs)):
@@ -85,8 +73,11 @@ def train_model(model, train_loader, optimizer, criterion, epochs):
             optimizer.step()
             break
         current_radii = model.radii(train_loader)
-        epoch_radii.append((epoch, current_radii))
-    return epoch_radii
+        current_train_error = 1 - 0.01*(test(model, train_loader))
+        if current_train_error <= 0.5:
+            epoch_radii.append((epoch, current_radii))
+            error_radii.append((current_train_error, current_radii))
+    return epoch_radii, error_radii
 
 
 def test(model, test_loader):
@@ -105,18 +96,17 @@ def test(model, test_loader):
     return 100 * correct / total
 
 
-def plot_radii(epoch_radii):
+def plot_radii(X_type, radii):
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     for i, ax in enumerate(axes.flatten()):
-        class_radii = [epoch_radii[j][1][i] for j in range(len(epoch_radii))]
-        epochs = [epoch_radii[j][0] for j in range(len(epoch_radii))]
-        ax.plot(epochs, class_radii, marker='o')
-        ax.set_title(f'Class {i} Radii Over Time')
-        ax.set_xlabel('Epochs')
+        y = [radii[j][1][i] for j in range(len(radii))]
+        X = [radii[j][0] for j in range(len(radii))]
+        ax.plot(X, y, marker='o')
+        ax.set_title(f'Class {i} Radii Over {X_type}')
+        ax.set_xlabel(X_type)
         ax.set_ylabel('Radius')
         ax.grid(True)
     plt.tight_layout()
-    plt.show()
 
 
 def plot_spiral_data(data, labels, title='Spiral Data'):

@@ -40,7 +40,7 @@ class SimpleNN(MyNN):
         self.layers = torch.nn.ModuleList([torch.nn.Linear(in_size, N_hid, bias=True)])
         for _ in range(L-1):
             self.layers.append(torch.nn.Linear(N_hid, N_hid, bias=True))
-        self.layers.append(torch.nn.Linear(N_hid, 2, bias=True))
+        self.layers.append(torch.nn.Linear(N_hid, 10, bias=True))
 
     def latent_representation(self, X):
         X = X.view(-1, self.layers[0].in_features)
