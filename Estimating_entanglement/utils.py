@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Subset
 import torchvision
 
-from neural_networks import SingleHyperplaneNet, ThreeHyperplanesNet
+from Estimating_entanglement.neural_networks import SingleHyperplaneNet, ThreeHyperplanesNet
 
 
 def load_dataset(n=-1):
