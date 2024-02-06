@@ -1,7 +1,9 @@
+import pickle
 from typing import List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy
 import torch
 import torchvision
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
@@ -23,6 +25,7 @@ def load_data():
     data_vars = torch.sqrt(torch.var(torch.cat([a[0] for n, a in enumerate(dataset) if in_block(n)]), dim=0))
     transf = lambda x: (x - data_means) / (data_vars + EPSILON)
     transform = transforms.Compose([transforms.ToTensor(), transf])
+
     train_dataset = datasets.MNIST(root="data", train=True, download=True, transform=transform)
     test_dataset = datasets.MNIST(root="data", train=False, download=True, transform=transform)
     full_dataset = ConcatDataset((train_dataset, test_dataset))
@@ -57,6 +60,98 @@ def create_spiral_data_loader(data, labels, batch_size=128):
     return DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
 
 
+def load_statistics(filename='statistics.pkl'):
+    with open(filename, 'rb') as f:
+        statistics = pickle.load(f)
+    return statistics
+
+
+def calculate_statistics(loader, k=5):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    data, targets = [], []
+    # Load all data and targets into memory (may require a lot of memory)
+    for i, (batch, target) in enumerate(loader):
+        data.append(batch.squeeze().to(device))
+        targets.append(target.to(device))
+        if i == 4:
+            break  # This is used to work on the subset (to replicate training scenario or to limit complexity).
+    # Use this when processing more than one batch
+    """data = torch.stack(data)
+    targets = torch.cat(targets)"""
+    # Use this when processing a single batch
+    data = torch.cat(data, dim=0)
+    data_flattened = data.view(data.shape[0], -1)
+    targets = torch.cat(targets, dim=0)
+    # Pre-compute all pairwise distances (this could be very memory intensive)
+    distances = torch.cdist(data_flattened, data_flattened, p=2)
+    statistics = []
+    print(len(data))
+    for i in tqdm(range(len(data)), desc='Calculating statistics for MNIST data samples.'):
+        same_class_mask = targets == targets[i]
+        diff_class_mask = ~same_class_mask
+        same_class_mask[i] = False  # Exclude the current sample
+        same_class_distances = distances[i][same_class_mask]
+        diff_class_distances = distances[i][diff_class_mask]
+        # Calculate statistics
+        min_distance_same_class = torch.min(same_class_distances)
+        min_distance_diff_class = torch.min(diff_class_distances)
+        k_smallest_same_class = torch.topk(same_class_distances, k, largest=False).values.mean()
+        k_smallest_diff_class = torch.topk(diff_class_distances, k, largest=False).values.mean()
+        avg_distance_same_class = same_class_distances.mean()
+        avg_distance_diff_class = diff_class_distances.mean()
+        stats = {
+            "min_distance_same_class": min_distance_same_class.item(),
+            "min_distance_diff_class": min_distance_diff_class.item(),
+            "k_smallest_same_class": k_smallest_same_class.item(),
+            "k_smallest_diff_class": k_smallest_diff_class.item(),
+            "avg_distance_same_class": avg_distance_same_class.item(),
+            "avg_distance_diff_class": avg_distance_diff_class.item(),
+        }
+        statistics.append(stats)
+    with open('statistics.pkl', 'wb') as f:
+        pickle.dump(statistics, f)
+    return statistics
+
+
+def plot_gaussian(ax, data, label, color='blue'):
+    mean, std = np.mean(data), np.std(data)
+    x = np.linspace(mean - 3 * std, mean + 3 * std, 100)
+    y = scipy.stats.norm.pdf(x, mean, std)
+    ax.plot(x, y, label=label, color=color)
+
+
+def plot_statistics(stats):
+    # Extract data for plotting
+    min_distances_same = [d['min_distance_same_class'] for d in stats]
+    min_distances_diff = [d['min_distance_diff_class'] for d in stats]
+    k_smallest_same = [d['k_smallest_same_class'] for d in stats]
+    k_smallest_diff = [d['k_smallest_diff_class'] for d in stats]
+    avg_distances_same = [d['avg_distance_same_class'] for d in stats]
+    avg_distances_diff = [d['avg_distance_diff_class'] for d in stats]
+    # Create figure and subplots
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle('Gaussian Distributions of Distances')
+    # Titles for subfigures
+    titles = ['Minimum Distances', 'K-Smallest Distances', 'Average Distances']
+    # Data to plot in each subfigure
+    data_to_plot = [
+        (min_distances_same, min_distances_diff),
+        (k_smallest_same, k_smallest_diff),
+        (avg_distances_same, avg_distances_diff),
+    ]
+    # Colors for plots
+    colors = [('blue', 'red'), ('green', 'orange'), ('purple', 'brown')]
+    # Plot each set of Gaussian distributions
+    for ax, (data_same, data_diff), title, (color_same, color_diff) in zip(axs, data_to_plot, titles, colors):
+        plot_gaussian(ax, data_same, 'Same Class', color=color_same)
+        plot_gaussian(ax, data_diff, 'Different Class', color=color_diff)
+        ax.set_title(title)
+        ax.set_xlabel('Distance')
+        ax.set_ylabel('Density')
+        ax.legend()
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+
 def train_model(model, train_loader, optimizer, criterion, epochs):
     epoch_radii = []
     error_radii = []
@@ -74,7 +169,7 @@ def train_model(model, train_loader, optimizer, criterion, epochs):
             break
         current_radii = model.radii(train_loader)
         current_train_error = 1 - 0.01*(test(model, train_loader))
-        if current_train_error <= 0.5:
+        if current_train_error <= 0.5 or True:
             epoch_radii.append((epoch, current_radii))
             error_radii.append((current_train_error, current_radii))
     return epoch_radii, error_radii
@@ -96,17 +191,23 @@ def test(model, test_loader):
     return 100 * correct / total
 
 
-def plot_radii(X_type, radii):
+def plot_radii(X_type, all_radii, save=False):
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
-    for i, ax in enumerate(axes.flatten()):
-        y = [radii[j][1][i] for j in range(len(radii))]
-        X = [radii[j][0] for j in range(len(radii))]
-        ax.plot(X, y, marker='o')
-        ax.set_title(f'Class {i} Radii Over {X_type}')
-        ax.set_xlabel(X_type)
-        ax.set_ylabel('Radius')
-        ax.grid(True)
+    for run_index in range(len(all_radii)):
+        radii = all_radii[run_index]
+        for i, ax in enumerate(axes.flatten()):
+            y = [radii[j][1][i] for j in range(len(radii))]
+            X = [radii[j][0] for j in range(len(radii))]
+            ax.plot(X, y, marker='o')
+            if run_index == 0:
+                ax.set_title(f'Class {i} Radii Over {X_type}')
+                ax.set_xlabel(X_type)
+                ax.set_ylabel('Radius')
+                ax.grid(True)
     plt.tight_layout()
+    if save:
+        plt.savefig(f'Figures/radii_over_{X_type}.png')
+        plt.savefig(f'Figures/radii_over_{X_type}.pdf')
 
 
 def plot_spiral_data(data, labels, title='Spiral Data'):
