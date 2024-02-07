@@ -187,6 +187,42 @@ def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
     return fig, axs
 
 
+def extract_top_samples(stats, full_dataset, percentile=92, n_classes=10):
+    """
+    Extracts top 8% samples based on six different statistics for each class.
+
+    :param stats: List of dictionaries containing statistics for each sample
+    :param full_dataset: Full dataset object
+    :param percentile: Percentile to consider for the top samples (default is 92 for top 8%)
+    :param n_classes: Number of classes in the dataset
+    :return: A dictionary of 6 lists, each containing indices of top samples based on a specific statistic
+    """
+    # Initialize the result dictionary
+    top_samples = {
+        "min_distance_same_class": [],
+        "min_distance_diff_class": [],
+        "k_smallest_same_class": [],
+        "k_smallest_diff_class": [],
+        "avg_distance_same_class": [],
+        "avg_distance_diff_class": []
+    }
+    for key in top_samples.keys():
+        # Initialize lists to hold top indices for each class based on the current statistic
+        top_indices_per_class = {k: [] for k in range(n_classes)}
+        # Separate samples by class
+        for class_idx in range(n_classes):
+            indices_of_class = [i for i, t in enumerate(full_dataset.targets) if t == class_idx]
+            stats_of_class = [stats[i][key] for i in indices_of_class]
+            # Calculate the threshold for the top percentile for the current class & statistic
+            threshold = np.percentile(stats_of_class, percentile)
+            # Select samples that are above the threshold
+            top_samples_indices = [indices_of_class[i] for i, s in enumerate(stats_of_class) if s >= threshold]
+            top_indices_per_class[class_idx].extend(top_samples_indices)
+        # Flatten the indices for easy access
+        top_samples[key] = [index for class_indices in top_indices_per_class.values() for index in class_indices]
+    return top_samples
+
+
 def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True):
     epoch_radii, error_radii = [], []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
