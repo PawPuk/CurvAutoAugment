@@ -1,12 +1,11 @@
 import os
 
 import matplotlib.pyplot as plt
-import torch
 import torch.nn as nn
 import torch.optim as optim
 
 from neural_networks import SimpleNN
-from utils import (calculate_percentiles, calculate_statistics, load_data, load_statistics, plot_radii, plot_statistics,
+from utils import (calculate_statistics, load_data, load_statistics, plot_radii, plot_statistics,
                    test, train_model, train_stop_at_inversion, transform_datasets_to_dataloaders)
 
 # Load the dataset. We copy the batch size from the "Inversion dynamics of class manifolds in deep learning ..." paper
@@ -17,8 +16,8 @@ if os.path.exists('statistics.pkl') and False:
     stats = load_statistics('statistics.pkl')
 else:
     stats = calculate_statistics(train_loader)
-# plot_statistics(stats)
-# all_epoch_radii, all_error_radii = [], []
+plot_statistics(stats)
+all_epoch_radii, all_error_radii = [], []
 stragglers = [None for _ in range(10)]
 for _ in range(1):
     # Instantiate the model, loss function, optimizer and learning rate scheduler
@@ -28,19 +27,7 @@ for _ in range(1):
     # Run the training process
     num_epochs = 500
     models = train_stop_at_inversion(model, train_loader, optimizer, criterion, num_epochs)
-    for data, target in train_loader:
-        for i in range(10):
-            if models[i] is not None:
-                stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))
-                data, target = data[stragglers[i]], target[stragglers[i]]
-                stragglers_stats = [stats[idx] for idx, s in enumerate(stragglers[i]) if s]
-                print(f'Found {len(stragglers_stats)} stragglers from class {i} out of '
-                      f'{len([s for s in stats if s["class"] == i])} data samples that were used for training.')
-                print(calculate_percentiles([s for s in stats if s["class"] == i], stragglers_stats))
-                plot_statistics([s for s in stats if s["class"] == i], stragglers_stats)
-                plt.show()
-        break
-    """epoch_radii, error_radii = train_model(model, train_loader, optimizer, criterion, num_epochs)
+    epoch_radii, error_radii = train_model(model, train_loader, optimizer, criterion, num_epochs)
     print(f'The model achieved the accuracy of {round(test(model, train_loader), 4)}% on the train set, and '
           f'{round(test(model, test_loader), 4)}% on the test set')
     all_epoch_radii.append(epoch_radii)
@@ -48,4 +35,4 @@ for _ in range(1):
 # Plot the results
 plot_radii('Epoch', all_epoch_radii)
 plot_radii('Error', all_error_radii)
-plt.show()"""
+plt.show()

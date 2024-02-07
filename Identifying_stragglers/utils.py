@@ -136,12 +136,13 @@ def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
     x = np.linspace(mean - 3*std, mean + 3*std, 1000)
     y = scipy.stats.norm.pdf(x, mean, std)
     ax.plot(x, y, label=label, color=color)
+    ax.axvline(median, color='grey', linestyle='--', label='Median')  # Draw a vertical line at the median
     if scatter_points is not None:
         scatter_y = scipy.stats.norm.pdf(scatter_points, mean, std)
         ax.scatter(scatter_points, scatter_y, color=color, s=50, edgecolor='black', zorder=5)
 
 
-def plot_statistics(stats, scatter_points=None):
+def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
     # Extract data for plotting
     min_distances_same = [d['min_distance_same_class'] for d in stats]
     min_distances_diff = [d['min_distance_diff_class'] for d in stats]
@@ -150,8 +151,12 @@ def plot_statistics(stats, scatter_points=None):
     avg_distances_same = [d['avg_distance_same_class'] for d in stats]
     avg_distances_diff = [d['avg_distance_diff_class'] for d in stats]
     # Create figure and subplots
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    fig.suptitle('Gaussian Distributions of Distances with Scatter Points')
+    if fig is None or axs is None:
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    if i is not None:
+        fig.suptitle(f'Gaussian Distributions of Distances with Scatter Points for Class {i}')
+    else:
+        fig.suptitle('Gaussian Distributions of Distances with Scatter Points')
     # Titles for subfigures
     titles = ['Minimum Distances', 'K-Smallest Distances', 'Average Distances']
     # Data to plot in each subfigure
@@ -174,12 +179,12 @@ def plot_statistics(stats, scatter_points=None):
                 (None, None)] * 3):
         plot_gaussian(ax, data_same, 'Same Class', color=color_same, scatter_points=scatter_data[0])
         plot_gaussian(ax, data_diff, 'Different Class', color=color_diff, scatter_points=scatter_data[1])
-        ax.axvline(median, color='grey', linestyle='--', label='Median')  # Draw a vertical line at the median
         ax.set_title(title)
         ax.set_xlabel('Distance')
         ax.set_ylabel('Density')
         ax.legend()
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    return fig, axs
 
 
 def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True):
@@ -205,9 +210,6 @@ def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=
                 epoch_radii.append((epoch, current_radii))
                 error_radii.append((current_train_error, current_radii))
     return epoch_radii, error_radii
-
-
-
 
 
 def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
