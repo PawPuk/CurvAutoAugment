@@ -7,7 +7,7 @@ import numpy as np
 import scipy
 import torch
 import torchvision
-from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
+from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
@@ -223,6 +223,21 @@ def extract_top_samples(stats, full_dataset, percentile=92, n_classes=10):
     return top_samples
 
 
+def create_data_splits(full_dataset, estimated_stragglers):
+    splits = {}
+    all_indices = set(range(len(full_dataset)))  # Assuming continuous indexing
+    for key in estimated_stragglers.keys():
+        # Stragglers for the current statistic
+        train_indices = set(estimated_stragglers[key])
+        # Non-stragglers for the current statistic
+        test_indices = all_indices - train_indices
+        # Creating Subset objects for train and test splits
+        train_split = Subset(full_dataset, list(train_indices))
+        test_split = Subset(full_dataset, list(test_indices))
+        splits[key] = {'train': train_split, 'test': test_split}
+    return splits
+
+
 def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True):
     epoch_radii, error_radii = [], []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -276,7 +291,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
     return models
 
 
-def test(model, test_loader):
+def test(model, test_loader, single_batch=True):
     model.eval()
     correct, total = 0, 0
     with torch.no_grad():
@@ -288,7 +303,8 @@ def test(model, test_loader):
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-            break
+            if single_batch:
+                break
     return 100 * correct / total
 
 
