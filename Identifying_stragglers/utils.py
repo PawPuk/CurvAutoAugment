@@ -37,13 +37,13 @@ def calculate_percentiles(stats, stragglers_stats):
     percentiles = {key: [] for key in stats[0]}  # Initialize dict for percentiles
 
     for key in stats[0]:
-        all_values = [d[key] for d in stats]  # Extract all values for the current key
-
-        # Calculate percentile for each straggler value
-        for straggler in stragglers_stats:
-            straggler_value = straggler[key]
-            percentile = scipy.stats.percentileofscore(all_values, straggler_value, kind='strict')
-            percentiles[key].append(percentile)
+        if key != 'class':
+            all_values = [d[key] for d in stats]  # Extract all values for the current key
+            # Calculate percentile for each straggler value
+            for straggler in stragglers_stats:
+                straggler_value = straggler[key]
+                percentile = scipy.stats.percentileofscore(all_values, straggler_value, kind='strict')
+                percentiles[key].append(percentile)
 
     return percentiles
 
@@ -132,11 +132,11 @@ def calculate_statistics(loader, k=5):
 
 def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
     mean, std = np.mean(data), np.std(data)
+    median = np.median(data)  # Calculate the median
     x = np.linspace(mean - 3*std, mean + 3*std, 1000)
     y = scipy.stats.norm.pdf(x, mean, std)
     ax.plot(x, y, label=label, color=color)
     if scatter_points is not None:
-        # Scatter the points on the plot
         scatter_y = scipy.stats.norm.pdf(scatter_points, mean, std)
         ax.scatter(scatter_points, scatter_y, color=color, s=50, edgecolor='black', zorder=5)
 
@@ -144,17 +144,11 @@ def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
 def plot_statistics(stats, scatter_points=None):
     # Extract data for plotting
     min_distances_same = [d['min_distance_same_class'] for d in stats]
-    print(max(min_distances_same), mean(min_distances_same), median(min_distances_same))
     min_distances_diff = [d['min_distance_diff_class'] for d in stats]
-    print(max(min_distances_diff), mean(min_distances_diff), median(min_distances_diff))
     k_smallest_same = [d['k_smallest_same_class'] for d in stats]
-    print(max(k_smallest_same), mean(k_smallest_same), median(k_smallest_same))
     k_smallest_diff = [d['k_smallest_diff_class'] for d in stats]
-    print(max(k_smallest_diff), mean(k_smallest_diff), median(k_smallest_diff))
     avg_distances_same = [d['avg_distance_same_class'] for d in stats]
-    print(max(avg_distances_same), mean(avg_distances_same), median(avg_distances_same))
     avg_distances_diff = [d['avg_distance_diff_class'] for d in stats]
-    print(max(avg_distances_diff), mean(avg_distances_diff), median(avg_distances_diff))
     # Create figure and subplots
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
     fig.suptitle('Gaussian Distributions of Distances with Scatter Points')
@@ -180,15 +174,15 @@ def plot_statistics(stats, scatter_points=None):
                 (None, None)] * 3):
         plot_gaussian(ax, data_same, 'Same Class', color=color_same, scatter_points=scatter_data[0])
         plot_gaussian(ax, data_diff, 'Different Class', color=color_diff, scatter_points=scatter_data[1])
+        ax.axvline(median, color='grey', linestyle='--', label='Median')  # Draw a vertical line at the median
         ax.set_title(title)
         ax.set_xlabel('Distance')
         ax.set_ylabel('Density')
         ax.legend()
-
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
 
-def train_model(model, train_loader, optimizer, criterion, epochs):
+def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True):
     epoch_radii, error_radii = [], []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -201,13 +195,19 @@ def train_model(model, train_loader, optimizer, criterion, epochs):
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-            break
-        current_radii = model.radii(train_loader)
-        current_train_error = 1 - 0.01*(test(model, train_loader))
-        if current_train_error <= 0.5 or True:
-            epoch_radii.append((epoch, current_radii))
-            error_radii.append((current_train_error, current_radii))
+            if single_batch:
+                print('adwdasd')
+                break
+        if single_batch:
+            current_radii = model.radii(train_loader)
+            current_train_error = 1 - 0.01*(test(model, train_loader))
+            if current_train_error <= 0.5 or True:
+                epoch_radii.append((epoch, current_radii))
+                error_radii.append((current_train_error, current_radii))
     return epoch_radii, error_radii
+
+
+
 
 
 def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
@@ -232,8 +232,8 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
         epochs -= 1
         count += 1
         prev_radii = current_radii
-        if len([x for x in models if x is not None]) > 0:
-            break
+        """if len([x for x in models if x is not None]) > 0:
+            break"""
         print(f'At most {epochs} epochs remaining. {len([x for x in models if x is not None])} models found.')
     return models
 
