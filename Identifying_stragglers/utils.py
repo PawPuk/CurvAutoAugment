@@ -1,3 +1,4 @@
+import copy
 import pickle
 from statistics import mean, median
 from typing import List, Tuple
@@ -10,6 +11,8 @@ import torchvision
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
 from tqdm import tqdm
+
+from neural_networks import SimpleNN
 
 
 PDATA = 8192  # number of elements in the data set
@@ -140,6 +143,64 @@ def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
     if scatter_points is not None:
         scatter_y = scipy.stats.norm.pdf(scatter_points, mean, std)
         ax.scatter(scatter_points, scatter_y, color=color, s=50, edgecolor='black', zorder=5)
+
+
+def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, straggler_target, non_straggler_target,
+                                            ratio):
+    # Randomly shuffle stragglers and non-stragglers
+    straggler_perm = torch.randperm(straggler_data.size(0))
+    non_straggler_perm = torch.randperm(non_straggler_data.size(0))
+    straggler_data, straggler_target = straggler_data[straggler_perm], straggler_target[straggler_perm]
+    non_straggler_data, non_straggler_target = non_straggler_data[non_straggler_perm], non_straggler_target[
+        non_straggler_perm]
+    # Calculate the number of stragglers and non-stragglers for the train/test set based on the ratio
+    total_train_stragglers = int(len(straggler_data) * ratio)
+    total_test_stragglers = len(straggler_data) - total_train_stragglers
+    total_train_non_stragglers = 60000 - total_train_stragglers
+    total_test_non_stragglers = len(non_straggler_data) - total_train_non_stragglers
+    # Create train and test sets
+    train_data = torch.cat((straggler_data[:total_train_stragglers], non_straggler_data[:total_train_non_stragglers]),
+                           dim=0)
+    train_targets = torch.cat(
+        (straggler_target[:total_train_stragglers], non_straggler_target[:total_train_non_stragglers]), dim=0)
+    test_data = torch.cat((straggler_data[-total_test_stragglers:], non_straggler_data[-total_test_non_stragglers:]),
+                          dim=0)
+    test_targets = torch.cat(
+        (straggler_target[-total_test_stragglers:], non_straggler_target[-total_test_non_stragglers:]), dim=0)
+    # Shuffle the datasets
+    train_permutation = torch.randperm(train_data.size(0))
+    test_permutation = torch.randperm(test_data.size(0))
+    train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
+    test_data, test_targets = test_data[test_permutation], test_targets[test_permutation]
+    # Create DataLoader objects
+    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=64, shuffle=True)
+    test_loader = DataLoader(TensorDataset(test_data, test_targets), batch_size=1000, shuffle=False)
+    return train_loader, test_loader
+
+
+def straggler_ratio_vs_generalisation(straggler_data, straggler_target, non_straggler_data, non_straggler_target):
+    straggler_ratios = np.linspace(0, 1, num=11)  # Define the ratios
+    test_accuracies_all_runs = {ratio: [] for ratio in straggler_ratios}  # Store accuracies for all runs
+    for ratio in straggler_ratios:
+        accuracies_for_ratio = []  # Store accuracies for the current ratio across different initializations
+        for _ in range(5):  # Train 5 models with different initializations
+            train_loader, test_loader = create_dataloaders_with_straggler_ratio(
+                straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio)
+            # Prepare for training
+            model = SimpleNN(28 * 28, 2, 40, 1)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+            criterion = torch.nn.CrossEntropyLoss()
+            num_epochs = 500
+            # Train the model
+            train_model(model, train_loader, optimizer, criterion, num_epochs, False)
+            # Evaluate the model on the test set
+            accuracy = test(model, test_loader, False)
+            accuracies_for_ratio.append(accuracy)
+        test_accuracies_all_runs[ratio] = accuracies_for_ratio
+    # Compute the average and standard deviation of accuracies for each ratio
+    avg_accuracies = [np.mean(test_accuracies_all_runs[ratio]) for ratio in straggler_ratios]
+    std_accuracies = [np.std(test_accuracies_all_runs[ratio]) for ratio in straggler_ratios]
+    return straggler_ratios, avg_accuracies, std_accuracies
 
 
 def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
