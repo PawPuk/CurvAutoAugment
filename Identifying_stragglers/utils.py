@@ -1,10 +1,11 @@
 import copy
 import pickle
 from statistics import mean, median
-from typing import List, Tuple
+from typing import List, Union, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import scipy
 import torch
 import torchvision
@@ -18,7 +19,7 @@ from neural_networks import SimpleNN
 PDATA = 8192  # number of elements in the data set
 DATA_BLOCK = 1  # Data block to use within the full data set
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
-tdDATASET = torchvision.datasets.MNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
+tdDATASET = torchvision.datasets.KMNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
 
 
 def load_data():
@@ -146,7 +147,7 @@ def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
 
 
 def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, straggler_target, non_straggler_target,
-                                            ratio):
+                                            ratio, train_ratio):
     # Randomly shuffle stragglers and non-stragglers
     straggler_perm = torch.randperm(straggler_data.size(0))
     non_straggler_perm = torch.randperm(non_straggler_data.size(0))
@@ -156,7 +157,7 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     # Calculate the number of stragglers and non-stragglers for the train/test set based on the ratio
     total_train_stragglers = int(len(straggler_data) * ratio)
     total_test_stragglers = len(straggler_data) - total_train_stragglers
-    total_train_non_stragglers = 60000 - total_train_stragglers
+    total_train_non_stragglers = int(round(train_ratio * 70000)) - total_train_stragglers
     total_test_non_stragglers = len(non_straggler_data) - total_train_non_stragglers
     # Create train and test sets
     train_data = torch.cat((straggler_data[:total_train_stragglers], non_straggler_data[:total_train_non_stragglers]),
@@ -178,14 +179,34 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     return train_loader, test_loader
 
 
-def straggler_ratio_vs_generalisation(straggler_data, straggler_target, non_straggler_data, non_straggler_target):
-    straggler_ratios = np.linspace(0, 1, num=11)  # Define the ratios
+def interpolate_colors(start_color, end_color, n):
+    """
+    Generates a list of colors interpolating between start_color and end_color.
+
+    Args:
+        start_color (tuple): The RGB tuple for the start color.
+        end_color (tuple): The RGB tuple for the end color.
+        n (int): The number of colors to generate.
+
+    Returns:
+        list of interpolated colors in hex format.
+    """
+    colors = []
+    for i in range(n):
+        interpolated_color = [start + (end - start) * i / (n - 1) for start, end in zip(start_color, end_color)]
+        colors.append('#' + ''.join(f'{int(c):02x}' for c in interpolated_color))
+    return colors
+
+
+def straggler_ratio_vs_generalisation(straggler_data, straggler_target, non_straggler_data, non_straggler_target,
+                                      train_ratio):
+    straggler_ratios = np.array([0, 0.2, 0.4, 0.6, 0.8, 1])  # Define the ratios
     test_accuracies_all_runs = {ratio: [] for ratio in straggler_ratios}  # Store accuracies for all runs
     for ratio in straggler_ratios:
         accuracies_for_ratio = []  # Store accuracies for the current ratio across different initializations
-        for _ in range(5):  # Train 5 models with different initializations
+        for _ in range(3):  # Train 3 models with different initializations
             train_loader, test_loader = create_dataloaders_with_straggler_ratio(
-                straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio)
+                straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio, train_ratio)
             # Prepare for training
             model = SimpleNN(28 * 28, 2, 40, 1)
             optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
@@ -248,7 +269,7 @@ def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
     return fig, axs
 
 
-def extract_top_samples(stats, full_dataset, percentile=92, n_classes=10):
+def extract_top_samples(stats, full_dataset: Union[ConcatDataset, Dataset], percentile=90, n_classes=10):
     """
     Extracts top 8% samples based on six different statistics for each class.
 
@@ -267,12 +288,26 @@ def extract_top_samples(stats, full_dataset, percentile=92, n_classes=10):
         "avg_distance_same_class": [],
         "avg_distance_diff_class": []
     }
+    # Attempt to aggregate targets from the full_dataset
+    try:
+        # If full_dataset is a simple dataset with .targets
+        if hasattr(full_dataset, 'targets'):
+            all_targets = full_dataset.targets
+        # If full_dataset is a ConcatDataset
+        elif hasattr(full_dataset, 'datasets'):
+            all_targets = []
+            for dataset in full_dataset.datasets:
+                all_targets.extend(dataset.targets)
+        else:
+            raise AttributeError("Dataset does not have targets or datasets attributes")
+    except Exception as e:
+        raise ValueError(f"Error processing dataset targets: {str(e)}")
     for key in top_samples.keys():
         # Initialize lists to hold top indices for each class based on the current statistic
         top_indices_per_class = {k: [] for k in range(n_classes)}
         # Separate samples by class
         for class_idx in range(n_classes):
-            indices_of_class = [i for i, t in enumerate(full_dataset.targets) if t == class_idx]
+            indices_of_class = [i for i, t in enumerate(all_targets) if t == class_idx]
             stats_of_class = [stats[i][key] for i in indices_of_class]
             # Calculate the threshold for the top percentile for the current class & statistic
             threshold = np.percentile(stats_of_class, percentile)
@@ -282,6 +317,32 @@ def extract_top_samples(stats, full_dataset, percentile=92, n_classes=10):
         # Flatten the indices for easy access
         top_samples[key] = [index for class_indices in top_indices_per_class.values() for index in class_indices]
     return top_samples
+
+
+def calculate_similarity_matrix(top_samples):
+    keys = list(top_samples.keys())
+    n = len(keys)
+    similarity_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            # Calculate intersection and union
+            set_i = set(top_samples[keys[i]])
+            set_j = set(top_samples[keys[j]])
+            intersection = len(set_i.intersection(set_j))
+            union = len(set_i.union(set_j))
+            # Calculate similarity as intersection over union
+            similarity_matrix[i, j] = intersection / union if union != 0 else 0
+    return keys, similarity_matrix
+
+
+def plot_similarity_matrix(keys, similarity_matrix):
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(similarity_matrix, annot=True, cmap='viridis', xticklabels=keys, yticklabels=keys, square=True,
+                cbar_kws={"shrink": .82}, linewidths=.1)
+    plt.title('Similarity Between Top Samples by Statistic')
+    plt.xlabel('Statistics')
+    plt.ylabel('Statistics')
+    plt.savefig('Figures/similarity_between_metrics.png')
 
 
 def create_data_splits(full_dataset, estimated_stragglers):
@@ -299,11 +360,11 @@ def create_data_splits(full_dataset, estimated_stragglers):
     return splits
 
 
-def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True):
+def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True, test_loader=None):
     epoch_radii, error_radii = [], []
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    for epoch in tqdm(range(epochs)):
+    for epoch in range(epochs):
         model.train()
         for data, target in train_loader:
             data, target = data.to(device), target.to(device)
@@ -313,14 +374,16 @@ def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=
             loss.backward()
             optimizer.step()
             if single_batch:
-                print('adwdasd')
                 break
         if single_batch:
             current_radii = model.radii(train_loader)
-            current_train_error = 1 - 0.01*(test(model, train_loader))
-            if current_train_error <= 0.5 or True:
+            if test_loader is not None:
+                current_error = 1 - 0.01 * (test(model, test_loader))
+            else:
+                current_error = 1 - 0.01*(test(model, train_loader))
+            if current_error <= 0.5 or True:
                 epoch_radii.append((epoch, current_radii))
-                error_radii.append((current_train_error, current_radii))
+                error_radii.append((current_error, current_radii))
     return epoch_radii, error_radii
 
 
@@ -370,13 +433,16 @@ def test(model, test_loader, single_batch=True):
 
 
 def plot_radii(X_type, all_radii, save=False):
+    start_color = (0, 0, 0)
+    end_color = (192, 192, 192)  # This represents a silver color
+    colors = interpolate_colors(start_color, end_color, len(all_radii))
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     for run_index in range(len(all_radii)):
         radii = all_radii[run_index]
         for i, ax in enumerate(axes.flatten()):
             y = [radii[j][1][i] for j in range(len(radii))]
             X = [radii[j][0] for j in range(len(radii))]
-            ax.plot(X, y, marker='o')
+            ax.plot(X, y, marker='o', color=colors[run_index])
             if run_index == 0:
                 ax.set_title(f'Class {i} Radii Over {X_type}')
                 ax.set_xlabel(X_type)
