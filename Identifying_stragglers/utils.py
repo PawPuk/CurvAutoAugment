@@ -19,7 +19,7 @@ from neural_networks import SimpleNN
 PDATA = 8192  # number of elements in the data set
 DATA_BLOCK = 1  # Data block to use within the full data set
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
-tdDATASET = torchvision.datasets.KMNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
+tdDATASET = torchvision.datasets.FashionMNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
 
 
 def load_data():
@@ -164,19 +164,25 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
                            dim=0)
     train_targets = torch.cat(
         (straggler_target[:total_train_stragglers], non_straggler_target[:total_train_non_stragglers]), dim=0)
-    test_data = torch.cat((straggler_data[-total_test_stragglers:], non_straggler_data[-total_test_non_stragglers:]),
-                          dim=0)
-    test_targets = torch.cat(
+    full_test_data = torch.cat((straggler_data[-total_test_stragglers:],
+                                non_straggler_data[-total_test_non_stragglers:]), dim=0)
+    straggler_test_data = straggler_data[-total_test_stragglers:]
+    non_straggler_test_data = non_straggler_data[-total_test_non_stragglers:]
+    full_test_targets = torch.cat(
         (straggler_target[-total_test_stragglers:], non_straggler_target[-total_test_non_stragglers:]), dim=0)
-    # Shuffle the datasets
+    straggler_test_targets = straggler_target[-total_test_stragglers:]
+    non_straggler_test_targets = non_straggler_target[-total_test_non_stragglers:]
+    # Shuffle the datasets and create DataLoaders
     train_permutation = torch.randperm(train_data.size(0))
-    test_permutation = torch.randperm(test_data.size(0))
     train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
-    test_data, test_targets = test_data[test_permutation], test_targets[test_permutation]
-    # Create DataLoader objects
     train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=64, shuffle=True)
-    test_loader = DataLoader(TensorDataset(test_data, test_targets), batch_size=1000, shuffle=False)
-    return train_loader, test_loader
+    test_loaders = []
+    for i in range(3):
+        test_permutation = torch.randperm([full_test_data, straggler_test_data, non_straggler_test_data][i].size(0))
+        test_data, test_targets = [full_test_data, straggler_test_data, non_straggler_test_data][i][test_permutation], \
+            [full_test_targets, straggler_test_targets, non_straggler_test_targets][i][test_permutation]
+        test_loaders.append(DataLoader(TensorDataset(test_data, test_targets), batch_size=1000, shuffle=False))
+    return train_loader, test_loaders
 
 
 def interpolate_colors(start_color, end_color, n):
@@ -198,14 +204,14 @@ def interpolate_colors(start_color, end_color, n):
     return colors
 
 
-def straggler_ratio_vs_generalisation(straggler_data, straggler_target, non_straggler_data, non_straggler_target,
-                                      train_ratio):
-    straggler_ratios = np.array([0, 0.2, 0.4, 0.6, 0.8, 1])  # Define the ratios
-    test_accuracies_all_runs = {ratio: [] for ratio in straggler_ratios}  # Store accuracies for all runs
+def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggler_target, non_straggler_data,
+                                      non_straggler_target, train_ratio):
+    settings = ['full', 'stragglers', 'non_stragglers']
+    test_accuracies_all_runs = {setting: {ratio: [] for ratio in straggler_ratios} for setting in settings}
     for ratio in straggler_ratios:
-        accuracies_for_ratio = []  # Store accuracies for the current ratio across different initializations
+        accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
         for _ in range(3):  # Train 3 models with different initializations
-            train_loader, test_loader = create_dataloaders_with_straggler_ratio(
+            train_loader, test_loaders = create_dataloaders_with_straggler_ratio(
                 straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio, train_ratio)
             # Prepare for training
             model = SimpleNN(28 * 28, 2, 40, 1)
@@ -214,14 +220,18 @@ def straggler_ratio_vs_generalisation(straggler_data, straggler_target, non_stra
             num_epochs = 500
             # Train the model
             train_model(model, train_loader, optimizer, criterion, num_epochs, False)
-            # Evaluate the model on the test set
-            accuracy = test(model, test_loader, False)
-            accuracies_for_ratio.append(accuracy)
-        test_accuracies_all_runs[ratio] = accuracies_for_ratio
+            # Evaluate the model on test sets
+            for i in range(3):
+                accuracy = test(model, test_loaders[i], False)
+                accuracies_for_ratio[i].append(accuracy)
+        for i in range(3):
+            test_accuracies_all_runs[settings[i]][ratio] = accuracies_for_ratio[i]
     # Compute the average and standard deviation of accuracies for each ratio
-    avg_accuracies = [np.mean(test_accuracies_all_runs[ratio]) for ratio in straggler_ratios]
-    std_accuracies = [np.std(test_accuracies_all_runs[ratio]) for ratio in straggler_ratios]
-    return straggler_ratios, avg_accuracies, std_accuracies
+    avg_accuracies = {settings[i]: [np.mean(test_accuracies_all_runs[settings[i]][ratio]) for ratio in straggler_ratios]
+                      for i in range(3)}
+    std_accuracies = {settings[i]: [np.std(test_accuracies_all_runs[settings[i]][ratio]) for ratio in straggler_ratios]
+                      for i in range(3)}
+    return avg_accuracies, std_accuracies
 
 
 def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
@@ -392,6 +402,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
                                  [None for _ in range(10)])
     count = 0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     while None in models and epochs > 0:
         model.train()
         for data, target in train_loader:
@@ -418,17 +429,19 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
 def test(model, test_loader, single_batch=True):
     model.eval()
     correct, total = 0, 0
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     with torch.no_grad():
-        for data in test_loader:
-            images, labels = data
-            if torch.cuda.is_available():
-                images, labels = images.cuda(), labels.cuda()
-            outputs = model(images)
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            outputs = model(data)
             _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
             if single_batch:
                 break
+    if total == 0:
+        return -1
     return 100 * correct / total
 
 

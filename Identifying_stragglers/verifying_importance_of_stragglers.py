@@ -1,6 +1,5 @@
 import copy
 
-import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -26,12 +25,16 @@ optimizer = optim.SGD(model.parameters(), lr=0.1)
 num_epochs = 500
 models = train_stop_at_inversion(model, full_loader, optimizer, criterion, num_epochs)
 # Calculate the number of steps in your gradient
-train_ratios = list(np.arange(0.9, 0, -0.1))
+train_ratios = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
 n_ratios = len(train_ratios)
 # Define your edge colors and select a colormap for the gradients
 start_color = (0, 0, 0)
 end_color = (192, 192, 192)  # This represents a silver color
+straggler_ratios = np.array([0, 0.2, 0.4, 0.6, 0.8, 1])  # Define the ratios
 colors = interpolate_colors(start_color, end_color, n_ratios)
+settings = ['full', 'stragglers', 'non_stragglers']
+avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
+std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
 for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
     straggler_data = torch.tensor([], dtype=torch.float32)
     straggler_target = torch.tensor([], dtype=torch.long)
@@ -49,15 +52,21 @@ for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through d
                 non_straggler_data = torch.cat((non_straggler_data, data[current_non_stragglers]), dim=0)
                 non_straggler_target = torch.cat((non_straggler_target, target[current_non_stragglers]), dim=0)
     print(f'A total of {len(straggler_data)} stragglers and {len(non_straggler_data)} non-stragglers were found.')
-    straggler_ratios, avg_accuracies, std_accuracies = straggler_ratio_vs_generalisation(
-        straggler_data, straggler_target, non_straggler_data, non_straggler_target, train_ratio)
-    print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies}.')
-
-    plt.errorbar(straggler_ratios, avg_accuracies, yerr=std_accuracies, marker='o', capsize=5, color=colors[idx])
-plt.xlabel('Ratio of Stragglers in Train Set')
-plt.ylabel('Accuracy on Test Set (%)')
-plt.title('Test Set Accuracy vs. Straggler Ratio')
-plt.grid(True)
-plt.savefig('Figures/generalisation_vs_straggler_ratio.png')
-plt.savefig('Figures/generalisation_vs_straggler_ratio.pdf')
-plt.show()
+    avg_accuracies, std_accuracies = straggler_ratio_vs_generalisation(straggler_ratios, straggler_data,
+                                                                       straggler_target, non_straggler_data,
+                                                                       non_straggler_target, train_ratio)
+    print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}.')
+    for setting in settings:
+        avg_accuracies[setting][train_ratio] = avg_accuracies
+        std_accuracies[setting][train_ratio] = std_accuracies
+for setting in settings:
+    for idx in range(len(train_ratios)):
+        ratio = train_ratios[idx]
+        plt.errorbar(straggler_ratios, avg_accuracies[setting][ratio], yerr=std_accuracies[setting][ratio], marker='o',
+                     capsize=5, color=colors[idx])
+    plt.xlabel('Train Stragglers to Test Stragglers Ratio')
+    plt.ylabel(f'Accuracy on {setting} Test Set (%)')
+    plt.grid(True)
+    plt.savefig(f'Figures/generalisation_vs_straggler_ratio_{setting}.png')
+    plt.savefig(f'Figures/generalisation_vs_straggler_ratio_{setting}.pdf')
+    plt.clf()
