@@ -8,8 +8,8 @@ import torch.optim as optim
 import tqdm
 
 from neural_networks import SimpleNN
-from utils import (load_data, interpolate_colors, straggler_ratio_vs_generalisation, train_stop_at_inversion,
-                   transform_datasets_to_dataloaders)
+from utils import (load_data, identify_hard_samples_with_model_accuracy, interpolate_colors,
+                   straggler_ratio_vs_generalisation, train_stop_at_inversion, transform_datasets_to_dataloaders)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Load the dataset. We copy the batch size from the "Inversion dynamics of class manifolds in deep learning ..." paper
@@ -23,6 +23,7 @@ model.to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(model.parameters(), lr=0.1)
 # Run the training process
+strategy = "stragglers"  # choose from "stragglers", "model", "cluster"
 num_epochs = 500
 models = train_stop_at_inversion(model, full_loader, optimizer, criterion, num_epochs)
 # Calculate the number of steps in your gradient
@@ -37,26 +38,30 @@ settings = ['full', 'stragglers', 'non_stragglers']
 total_avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
 total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
 for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
-    straggler_data = torch.tensor([], dtype=torch.float32)
-    straggler_target = torch.tensor([], dtype=torch.long)
-    non_straggler_data = torch.tensor([], dtype=torch.float32)
-    non_straggler_target = torch.tensor([], dtype=torch.long)
+    stragglers_data = torch.tensor([], dtype=torch.float32).to(device)
+    stragglers_target = torch.tensor([], dtype=torch.long).to(device)
+    non_stragglers_data = torch.tensor([], dtype=torch.float32).to(device)
+    non_stragglers_target = torch.tensor([], dtype=torch.long).to(device)
     for data, target in full_loader:
         data, target = data.to(device), target.to(device)
-        for i in range(10):
-            if models[i] is not None:
-                stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))
-                current_non_stragglers = (torch.argmax(model(data), dim=1) == target) & (target == i)
-                # Concatenate the straggler data and targets
-                straggler_data = torch.cat((straggler_data, data[stragglers[i]]), dim=0)
-                straggler_target = torch.cat((straggler_target, target[stragglers[i]]), dim=0)
-                # Concatenate the non-straggler data and targets
-                non_straggler_data = torch.cat((non_straggler_data, data[current_non_stragglers]), dim=0)
-                non_straggler_target = torch.cat((non_straggler_target, target[current_non_stragglers]), dim=0)
-    print(f'A total of {len(straggler_data)} stragglers and {len(non_straggler_data)} non-stragglers were found.')
-    avg_accuracies, std_accuracies = straggler_ratio_vs_generalisation(straggler_ratios, straggler_data,
-                                                                       straggler_target, non_straggler_data,
-                                                                       non_straggler_target, train_ratio)
+        if strategy == "stragglers":
+            for i in range(10):
+                if models[i] is not None:
+                    stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))
+                    current_non_stragglers = (torch.argmax(model(data), dim=1) == target) & (target == i)
+                    # Concatenate the straggler data and targets
+                    straggler_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
+                    straggler_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
+                    # Concatenate the non-straggler data and targets
+                    non_straggler_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
+                    non_straggler_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
+        elif strategy == "model":
+            stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
+                identify_hard_samples_with_model_accuracy(model, full_dataset, optimizer, criterion, num_epochs))
+    print(f'A total of {len(stragglers_data)} stragglers and {len(non_stragglers_data)} non-stragglers were found.')
+    avg_accuracies, std_accuracies = straggler_ratio_vs_generalisation(straggler_ratios, stragglers_data,
+                                                                       stragglers_target, non_stragglers_data,
+                                                                       non_stragglers_target, train_ratio)
     print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}.')
     for setting in settings:
         total_avg_accuracies[setting][train_ratio] = avg_accuracies

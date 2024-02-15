@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import scipy
+from sklearn.model_selection import KFold
 import torch
 import torchvision
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
@@ -421,6 +422,53 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
             break"""
         print(f'At most {epochs} epochs remaining. {len([x for x in models if x is not None])} models found.')
     return models
+
+
+def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, num_epochs):
+    # Using KFold cross-validation to train and evaluate model
+    kfold = KFold(n_splits=5, shuffle=True)
+    results = []
+    dataset_size = len(dataset)
+    indices = list(range(dataset_size))
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(indices)):
+        # Convert indices to boolean mask for simplicity
+        train_mask = torch.zeros(dataset_size, dtype=bool)
+        train_mask[train_idx] = True
+        # DataLoader for the entire dataset for GD
+        full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
+        # Training phase
+        model.train()
+        for epoch in range(num_epochs):
+            for data, target in full_loader:
+                data, target = data.to(DEVICE), target.to(DEVICE)
+                optimizer.zero_grad()
+                output = model(data[train_mask])
+                loss = criterion(output, target[train_mask])
+                loss.backward()
+                optimizer.step()
+        # Evaluation phase
+        model.eval()
+        test_mask = torch.zeros(dataset_size, dtype=bool)
+        test_mask[test_idx] = True
+        with torch.no_grad():
+            for data, target in full_loader:
+                data, target = data.to(DEVICE), target.to(DEVICE)
+                output = model(data[test_mask])
+                pred = output.argmax(dim=1, keepdim=True)
+                correct = pred.eq(target[test_mask].view_as(pred)).squeeze()
+                confidence = output.max(1)[0].cpu().numpy()
+                # Save results: index, confidence, correctness
+                results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
+    # Identify and separate stragglers based on confidence
+    results.sort(key=lambda x: x[1])  # Sort by confidence
+    stragglers_idx = [x[0] for x in results[:6000]]
+    non_stragglers_idx = [x[0] for x in results[6000:]]
+    # Extract data and targets for stragglers and non-stragglers
+    stragglers_data = [dataset[i][0] for i in stragglers_idx]
+    stragglers_target = [dataset[i][1] for i in stragglers_idx]
+    non_stragglers_data = [dataset[i][0] for i in non_stragglers_idx]
+    non_stragglers_target = [dataset[i][1] for i in non_stragglers_idx]
+    return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
 def test(model, test_loader, single_batch=True):
