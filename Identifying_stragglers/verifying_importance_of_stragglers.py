@@ -33,8 +33,8 @@ end_color = (192, 192, 192)  # This represents a silver color
 straggler_ratios = np.array([0, 0.2, 0.4, 0.6, 0.8, 1])  # Define the ratios
 colors = interpolate_colors(start_color, end_color, n_ratios)
 settings = ['full', 'stragglers', 'non_stragglers']
-avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
-std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
+total_avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
+total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in settings}
 for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
     straggler_data = torch.tensor([], dtype=torch.float32)
     straggler_target = torch.tensor([], dtype=torch.long)
@@ -57,13 +57,13 @@ for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through d
                                                                        non_straggler_target, train_ratio)
     print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}.')
     for setting in settings:
-        avg_accuracies[setting][train_ratio] = avg_accuracies
-        std_accuracies[setting][train_ratio] = std_accuracies
+        total_avg_accuracies[setting][train_ratio] = avg_accuracies
+        total_std_accuracies[setting][train_ratio] = std_accuracies
 for setting in settings:
     for idx in range(len(train_ratios)):
         ratio = train_ratios[idx]
-        plt.errorbar(straggler_ratios, avg_accuracies[setting][ratio], yerr=std_accuracies[setting][ratio], marker='o',
-                     capsize=5, color=colors[idx])
+        plt.errorbar(straggler_ratios, total_avg_accuracies[setting][ratio], yerr=total_std_accuracies[setting][ratio],
+                     marker='o', capsize=5, color=colors[idx])
     plt.xlabel('Train Stragglers to Test Stragglers Ratio')
     plt.ylabel(f'Accuracy on {setting} Test Set (%)')
     plt.grid(True)
