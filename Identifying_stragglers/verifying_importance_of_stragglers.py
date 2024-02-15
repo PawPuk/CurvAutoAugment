@@ -11,6 +11,7 @@ from neural_networks import SimpleNN
 from utils import (load_data, interpolate_colors, straggler_ratio_vs_generalisation, train_stop_at_inversion,
                    transform_datasets_to_dataloaders)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Load the dataset. We copy the batch size from the "Inversion dynamics of class manifolds in deep learning ..." paper
 train_dataset, test_dataset, full_dataset = load_data()
 train_loader, test_loader, full_loader = transform_datasets_to_dataloaders(
@@ -18,7 +19,7 @@ train_loader, test_loader, full_loader = transform_datasets_to_dataloaders(
 stragglers = [None for _ in range(10)]
 # Instantiate the model, loss function, optimizer and learning rate scheduler
 model = SimpleNN(28*28, 2, 40, 1)
-model1 = copy.deepcopy(model)
+model.to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(model.parameters(), lr=0.1)
 # Run the training process
@@ -41,6 +42,7 @@ for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through d
     non_straggler_data = torch.tensor([], dtype=torch.float32)
     non_straggler_target = torch.tensor([], dtype=torch.long)
     for data, target in full_loader:
+        data, target = data.to(device), target.to(device)
         for i in range(10):
             if models[i] is not None:
                 stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))

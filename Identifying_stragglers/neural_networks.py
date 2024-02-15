@@ -2,6 +2,9 @@
 import torch
 
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class MyNN(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -12,6 +15,7 @@ class MyNN(torch.nn.Module):
     def radii(self, data_loader):
         radii = {i: [] for i in range(10)}
         for data, target in data_loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
             with torch.no_grad():
                 for i in range(10):
                     class_data = data[target == i]
