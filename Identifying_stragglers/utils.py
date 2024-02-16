@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import scipy
+from sklearn.model_selection import KFold
 import torch
 import torchvision
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
@@ -20,6 +21,7 @@ PDATA = 8192  # number of elements in the data set
 DATA_BLOCK = 1  # Data block to use within the full data set
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
 tdDATASET = torchvision.datasets.FashionMNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_data():
@@ -214,7 +216,7 @@ def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggle
             train_loader, test_loaders = create_dataloaders_with_straggler_ratio(
                 straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio, train_ratio)
             # Prepare for training
-            model = SimpleNN(28 * 28, 2, 40, 1)
+            model = SimpleNN(28 * 28, 2, 40, 1).to(DEVICE)
             optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
             criterion = torch.nn.CrossEntropyLoss()
             num_epochs = 500
@@ -372,12 +374,10 @@ def create_data_splits(full_dataset, estimated_stragglers):
 
 def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True, test_loader=None):
     epoch_radii, error_radii = [], []
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
     for epoch in range(epochs):
         model.train()
         for data, target in train_loader:
-            data, target = data.to(device), target.to(device)
+            data, target = data.to(DEVICE), target.to(DEVICE)
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
@@ -401,12 +401,10 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
     prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
                                  [None for _ in range(10)])
     count = 0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
     while None in models and epochs > 0:
         model.train()
         for data, target in train_loader:
-            data, target = data.to(device), target.to(device)
+            data, target = data.to(DEVICE), target.to(DEVICE)
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
@@ -416,7 +414,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
         current_radii = model.radii(train_loader)
         for key in current_radii.keys():
             if models[key] is None and current_radii[key][0].item() > prev_radii[key][0].item() and count > 20:
-                models[key] = model
+                models[key] = model.to(DEVICE)
         epochs -= 1
         count += 1
         prev_radii = current_radii
@@ -426,14 +424,59 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
     return models
 
 
+def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, num_epochs):
+    # Using KFold cross-validation to train and evaluate model
+    kfold = KFold(n_splits=5, shuffle=True)
+    results = []
+    dataset_size = len(dataset)
+    indices = list(range(dataset_size))
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(indices)):
+        # Convert indices to boolean mask for simplicity
+        train_mask = torch.zeros(dataset_size, dtype=bool)
+        train_mask[train_idx] = True
+        # DataLoader for the entire dataset for GD
+        full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
+        # Training phase
+        model.train()
+        for epoch in range(num_epochs):
+            for data, target in full_loader:
+                data, target = data.to(DEVICE), target.to(DEVICE)
+                optimizer.zero_grad()
+                output = model(data[train_mask])
+                loss = criterion(output, target[train_mask])
+                loss.backward()
+                optimizer.step()
+        # Evaluation phase
+        model.eval()
+        test_mask = torch.zeros(dataset_size, dtype=bool)
+        test_mask[test_idx] = True
+        with torch.no_grad():
+            for data, target in full_loader:
+                data, target = data.to(DEVICE), target.to(DEVICE)
+                output = model(data[test_mask])
+                pred = output.argmax(dim=1, keepdim=True)
+                correct = pred.eq(target[test_mask].view_as(pred)).squeeze()
+                confidence = output.max(1)[0].cpu().numpy()
+                # Save results: index, confidence, correctness
+                results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
+    # Identify and separate stragglers based on confidence
+    results.sort(key=lambda x: x[1])  # Sort by confidence
+    stragglers_idx = [x[0] for x in results[:6000]]
+    non_stragglers_idx = [x[0] for x in results[6000:]]
+    # Extract data and targets for stragglers and non-stragglers
+    stragglers_data = [dataset[i][0] for i in stragglers_idx]
+    stragglers_target = [dataset[i][1] for i in stragglers_idx]
+    non_stragglers_data = [dataset[i][0] for i in non_stragglers_idx]
+    non_stragglers_target = [dataset[i][1] for i in non_stragglers_idx]
+    return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
+
+
 def test(model, test_loader, single_batch=True):
     model.eval()
     correct, total = 0, 0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
     with torch.no_grad():
         for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
+            data, target = data.to(DEVICE), target.to(DEVICE)
             outputs = model(data)
             _, predicted = torch.max(outputs.data, 1)
             total += target.size(0)
