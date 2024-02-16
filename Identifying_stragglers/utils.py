@@ -175,7 +175,7 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     # Shuffle the datasets and create DataLoaders
     train_permutation = torch.randperm(train_data.size(0))
     train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
-    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=64, shuffle=True)
+    train_loader = DataLoader(TensorDataset(`train_data`, train_targets), batch_size=64, shuffle=True)
     test_loaders = []
     for i in range(3):
         test_permutation = torch.randperm([full_test_data, straggler_test_data, non_straggler_test_data][i].size(0))

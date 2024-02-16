@@ -55,13 +55,16 @@ for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through d
     avg_accuracies, std_accuracies = straggler_ratio_vs_generalisation(straggler_ratios, straggler_data,
                                                                        straggler_target, non_straggler_data,
                                                                        non_straggler_target, train_ratio)
-    print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}.')
+    print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}% on full test set,'
+          f'{avg_accuracies["stragglers"]}% on test stragglers and {avg_accuracies["non_stragglers"]}% on '
+          f'non-stragglers.')
     for setting in settings:
-        total_avg_accuracies[setting][train_ratio] = avg_accuracies
-        total_std_accuracies[setting][train_ratio] = std_accuracies
+        total_avg_accuracies[setting][train_ratio] = avg_accuracies[setting]
+        total_std_accuracies[setting][train_ratio] = std_accuracies[setting]
 for setting in settings:
     for idx in range(len(train_ratios)):
         ratio = train_ratios[idx]
+        print()
         plt.errorbar(straggler_ratios, total_avg_accuracies[setting][ratio], yerr=total_std_accuracies[setting][ratio],
                      marker='o', capsize=5, color=colors[idx])
     plt.xlabel('Train Stragglers to Test Stragglers Ratio')
