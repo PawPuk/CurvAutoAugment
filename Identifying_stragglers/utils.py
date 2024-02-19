@@ -16,26 +16,40 @@ from tqdm import tqdm
 
 from neural_networks import SimpleNN
 
-
 PDATA = 8192  # number of elements in the data set
 DATA_BLOCK = 1  # Data block to use within the full data set
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
-tdDATASET = torchvision.datasets.FashionMNIST  # the dataset (MNIST, KMNIST, FashionMNIST, CIFAR10)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def load_data():
-    dataset = tdDATASET("data", train=True, download=True,
-                        transform=torchvision.transforms.ToTensor())
-    in_block = lambda n: (DATA_BLOCK - 1) * PDATA <= n < DATA_BLOCK * PDATA
-    data_means = torch.mean(torch.cat([a[0] for n, a in enumerate(dataset) if in_block(n)]), dim=0)
-    data_vars = torch.sqrt(torch.var(torch.cat([a[0] for n, a in enumerate(dataset) if in_block(n)]), dim=0))
-    transf = lambda x: (x - data_means) / (data_vars + EPSILON)
-    transform = transforms.Compose([transforms.ToTensor(), transf])
+def load_data(dataset_name):
+    DatasetClass = getattr(datasets, dataset_name)
 
-    train_dataset = datasets.MNIST(root="data", train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST(root="data", train=False, download=True, transform=transform)
-    full_dataset = ConcatDataset((train_dataset, test_dataset))
+    # Initial dataset for mean/var calculation
+    initial_transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+    dataset = DatasetClass(root="./data", train=True, download=True, transform=initial_transform)
+
+    # Calculate means and vars
+    tensors = [a[0] for n, a in enumerate(dataset)]
+    stacked_tensors = torch.stack(tensors)
+    data_means = torch.mean(stacked_tensors, dim=(0, 2, 3))
+    data_vars = torch.sqrt(torch.var(stacked_tensors, dim=(0, 2, 3)) + EPSILON)
+
+    # Define transform with normalization
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=data_means, std=data_vars)
+    ])
+
+    # Load datasets with the transformation applied
+    train_dataset = DatasetClass(root="./data", train=True, download=True, transform=transform)
+    test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
+
+    # Concatenate datasets if needed
+    full_dataset = ConcatDataset([train_dataset, test_dataset])
+
     return train_dataset, test_dataset, full_dataset
 
 
@@ -65,9 +79,9 @@ def generate_spiral_data(n_points, noise=0.5):
     :param noise: Standard deviation of Gaussian noise added to the data.
     :return: data (features), labels
     """
-    n = np.sqrt(np.random.rand(n_points, 1)) * 780 * (1*np.pi)/360
-    d1x = -np.cos(n)*n + np.random.rand(n_points, 1) * noise
-    d1y = np.sin(n)*n + np.random.rand(n_points, 1) * noise
+    n = np.sqrt(np.random.rand(n_points, 1)) * 780 * (1 * np.pi) / 360
+    d1x = -np.cos(n) * n + np.random.rand(n_points, 1) * noise
+    d1y = np.sin(n) * n + np.random.rand(n_points, 1) * noise
     return (np.vstack((np.hstack((d1x, d1y)), np.hstack((-d1x, -d1y)))),
             np.hstack((np.zeros(n_points), np.ones(n_points))))
 
@@ -139,7 +153,7 @@ def calculate_statistics(loader, k=5):
 def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
     mean, std = np.mean(data), np.std(data)
     median = np.median(data)  # Calculate the median
-    x = np.linspace(mean - 3*std, mean + 3*std, 1000)
+    x = np.linspace(mean - 3 * std, mean + 3 * std, 1000)
     y = scipy.stats.norm.pdf(x, mean, std)
     ax.plot(x, y, label=label, color=color)
     ax.axvline(median, color='grey', linestyle='--', label='Median')  # Draw a vertical line at the median
@@ -149,77 +163,75 @@ def plot_gaussian(ax, data, label, color='blue', scatter_points=None):
 
 
 def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, straggler_target, non_straggler_target,
-                                            ratio, train_ratio):
+                                            split_ratio, reduce_train_ratio, reduce_stragglers=True):
     # Randomly shuffle stragglers and non-stragglers
     straggler_perm = torch.randperm(straggler_data.size(0))
     non_straggler_perm = torch.randperm(non_straggler_data.size(0))
     straggler_data, straggler_target = straggler_data[straggler_perm], straggler_target[straggler_perm]
     non_straggler_data, non_straggler_target = non_straggler_data[non_straggler_perm], non_straggler_target[
         non_straggler_perm]
-    # Calculate the number of stragglers and non-stragglers for the train/test set based on the ratio
-    total_train_stragglers = int(len(straggler_data) * ratio)
-    total_test_stragglers = len(straggler_data) - total_train_stragglers
-    total_train_non_stragglers = int(round(train_ratio * 70000)) - total_train_stragglers
-    total_test_non_stragglers = len(non_straggler_data) - total_train_non_stragglers
-    # Create train and test sets
-    train_data = torch.cat((straggler_data[:total_train_stragglers], non_straggler_data[:total_train_non_stragglers]),
-                           dim=0)
-    train_targets = torch.cat(
-        (straggler_target[:total_train_stragglers], non_straggler_target[:total_train_non_stragglers]), dim=0)
-    full_test_data = torch.cat((straggler_data[-total_test_stragglers:],
-                                non_straggler_data[-total_test_non_stragglers:]), dim=0)
-    straggler_test_data = straggler_data[-total_test_stragglers:]
-    non_straggler_test_data = non_straggler_data[-total_test_non_stragglers:]
-    full_test_targets = torch.cat(
-        (straggler_target[-total_test_stragglers:], non_straggler_target[-total_test_non_stragglers:]), dim=0)
-    straggler_test_targets = straggler_target[-total_test_stragglers:]
-    non_straggler_test_targets = non_straggler_target[-total_test_non_stragglers:]
-    # Shuffle the datasets and create DataLoaders
-    train_permutation = torch.randperm(train_data.size(0))
-    train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
-    train_loader = DataLoader(TensorDataset(`train_data`, train_targets), batch_size=64, shuffle=True)
+    # Split data into initial train/test sets based on the split_ratio and make sure that split_ratio is correct
+    if not 0 <= split_ratio <= 1:
+        raise ValueError('The variable split_ratio must be between 0 and 1.')
+    train_size_straggler = int(len(straggler_data) * split_ratio)
+    train_size_non_straggler = int(len(non_straggler_data) * split_ratio)
+
+    initial_train_stragglers_data = straggler_data[:train_size_straggler]
+    initial_train_stragglers_target = straggler_target[:train_size_straggler]
+    initial_test_stragglers_data = straggler_data[train_size_straggler:]
+    initial_test_stragglers_target = straggler_target[train_size_straggler:]
+
+    initial_train_non_stragglers_data = non_straggler_data[:train_size_non_straggler]
+    initial_train_non_stragglers_target = non_straggler_target[:train_size_non_straggler]
+    initial_test_non_stragglers_data = non_straggler_data[train_size_non_straggler:]
+    initial_test_non_stragglers_target = non_straggler_target[train_size_non_straggler:]
+    # Reduce the number of train samples by reduce_train_ratio
+    if not 0 <= reduce_train_ratio <= 1:
+        raise ValueError('The variable reduce_train_ratio must be between 0 and 1.')
+    if reduce_stragglers:
+        reduced_train_size_straggler = int(train_size_straggler * reduce_train_ratio)
+        reduced_train_size_non_straggler = train_size_non_straggler
+    else:
+        reduced_train_size_straggler = train_size_straggler
+        reduced_train_size_non_straggler = int(train_size_non_straggler * reduce_train_ratio)
+
+    final_train_data = torch.cat((initial_train_stragglers_data[:reduced_train_size_straggler],
+                                  initial_train_non_stragglers_data[:reduced_train_size_non_straggler]), dim=0)
+    final_train_targets = torch.cat((initial_train_stragglers_target[:reduced_train_size_straggler],
+                                     initial_train_non_stragglers_target[:reduced_train_size_non_straggler]), dim=0)
+    # Shuffle the final train dataset
+    train_permutation = torch.randperm(final_train_data.size(0))
+    train_data, train_targets = final_train_data[train_permutation], final_train_targets[train_permutation]
+    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=70000, shuffle=True)
+    # Create test loaders
     test_loaders = []
-    for i in range(3):
-        test_permutation = torch.randperm([full_test_data, straggler_test_data, non_straggler_test_data][i].size(0))
-        test_data, test_targets = [full_test_data, straggler_test_data, non_straggler_test_data][i][test_permutation], \
-            [full_test_targets, straggler_test_targets, non_straggler_test_targets][i][test_permutation]
-        test_loaders.append(DataLoader(TensorDataset(test_data, test_targets), batch_size=1000, shuffle=False))
+    datasets = [(initial_test_stragglers_data, initial_test_stragglers_target),
+                (initial_test_non_stragglers_data, initial_test_non_stragglers_target)]
+    full_test_data = torch.cat((datasets[0][0], datasets[1][0]), dim=0)  # Concatenate data
+    full_test_targets = torch.cat((datasets[0][1], datasets[1][1]), dim=0)  # Concatenate targets
+    # Create test loaders based on the ordered datasets
+    test_loaders = []
+    for data, target in [(full_test_data, full_test_targets)] + datasets:
+        test_loader = DataLoader(TensorDataset(data, target), batch_size=1000, shuffle=False)
+        test_loaders.append(test_loader)
+
     return train_loader, test_loaders
 
 
-def interpolate_colors(start_color, end_color, n):
-    """
-    Generates a list of colors interpolating between start_color and end_color.
-
-    Args:
-        start_color (tuple): The RGB tuple for the start color.
-        end_color (tuple): The RGB tuple for the end color.
-        n (int): The number of colors to generate.
-
-    Returns:
-        list of interpolated colors in hex format.
-    """
-    colors = []
-    for i in range(n):
-        interpolated_color = [start + (end - start) * i / (n - 1) for start, end in zip(start_color, end_color)]
-        colors.append('#' + ''.join(f'{int(c):02x}' for c in interpolated_color))
-    return colors
-
-
 def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggler_target, non_straggler_data,
-                                      non_straggler_target, train_ratio):
+                                      non_straggler_target, split_ratio):
     settings = ['full', 'stragglers', 'non_stragglers']
     test_accuracies_all_runs = {setting: {ratio: [] for ratio in straggler_ratios} for setting in settings}
     for ratio in straggler_ratios:
         accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
-        for _ in range(3):  # Train 3 models with different initializations
+        for _ in range(2):  # Train 5 models with different initializations
             train_loader, test_loaders = create_dataloaders_with_straggler_ratio(
-                straggler_data, non_straggler_data, straggler_target, non_straggler_target, ratio, train_ratio)
+                straggler_data, non_straggler_data, straggler_target, non_straggler_target, split_ratio, ratio)
             # Prepare for training
             model = SimpleNN(28 * 28, 2, 40, 1).to(DEVICE)
             optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
             criterion = torch.nn.CrossEntropyLoss()
-            num_epochs = 500
+            num_epochs = 200
             # Train the model
             train_model(model, train_loader, optimizer, criterion, num_epochs, False)
             # Evaluate the model on test sets
@@ -390,7 +402,7 @@ def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=
             if test_loader is not None:
                 current_error = 1 - 0.01 * (test(model, test_loader))
             else:
-                current_error = 1 - 0.01*(test(model, train_loader))
+                current_error = 1 - 0.01 * (test(model, train_loader))
             if current_error <= 0.5 or True:
                 epoch_radii.append((epoch, current_radii))
                 error_radii.append((current_error, current_radii))
@@ -426,7 +438,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
 
 def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, num_epochs):
     # Using KFold cross-validation to train and evaluate model
-    kfold = KFold(n_splits=5, shuffle=True)
+    kfold = KFold(n_splits=2, shuffle=True)
     results = []
     dataset_size = len(dataset)
     indices = list(range(dataset_size))
@@ -464,10 +476,10 @@ def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criteri
     stragglers_idx = [x[0] for x in results[:6000]]
     non_stragglers_idx = [x[0] for x in results[6000:]]
     # Extract data and targets for stragglers and non-stragglers
-    stragglers_data = [dataset[i][0] for i in stragglers_idx]
-    stragglers_target = [dataset[i][1] for i in stragglers_idx]
-    non_stragglers_data = [dataset[i][0] for i in non_stragglers_idx]
-    non_stragglers_target = [dataset[i][1] for i in non_stragglers_idx]
+    stragglers_data = torch.stack([dataset[i][0] for i in stragglers_idx], dim=0)
+    stragglers_target = torch.tensor([dataset[i][1] for i in stragglers_idx])
+    non_stragglers_data = torch.stack([dataset[i][0] for i in non_stragglers_idx], dim=0)
+    non_stragglers_target = torch.tensor([dataset[i][1] for i in non_stragglers_idx])
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
@@ -511,7 +523,6 @@ def plot_radii(X_type, all_radii, save=False):
 
 
 def plot_spiral_data(data, labels, title='Spiral Data'):
-
     """
     Plots the 2D spiral data.
     :param data: Features (data points).
@@ -524,4 +535,3 @@ def plot_spiral_data(data, labels, title='Spiral Data'):
     plt.xlabel('Feature 1')
     plt.ylabel('Feature 2')
     plt.show()
-
