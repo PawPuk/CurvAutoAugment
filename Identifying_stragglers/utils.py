@@ -1,6 +1,4 @@
-import copy
 import pickle
-from statistics import mean, median
 from typing import List, Union, Tuple
 
 import matplotlib.pyplot as plt
@@ -9,7 +7,7 @@ import seaborn as sns
 import scipy
 from sklearn.model_selection import KFold
 import torch
-import torchvision
+import torch.optim as optim
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
 from tqdm import tqdm
@@ -20,37 +18,30 @@ PDATA = 8192  # number of elements in the data set
 DATA_BLOCK = 1  # Data block to use within the full data set
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPOCHS = 500
 
 
 def load_data(dataset_name):
     DatasetClass = getattr(datasets, dataset_name)
-
     # Initial dataset for mean/var calculation
-    initial_transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
+    initial_transform = transforms.Compose([transforms.ToTensor()])
     dataset = DatasetClass(root="./data", train=True, download=True, transform=initial_transform)
-
     # Calculate means and vars
     tensors = [a[0] for n, a in enumerate(dataset)]
     stacked_tensors = torch.stack(tensors)
     data_means = torch.mean(stacked_tensors, dim=(0, 2, 3))
     data_vars = torch.sqrt(torch.var(stacked_tensors, dim=(0, 2, 3)) + EPSILON)
-
     # Define transform with normalization
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=data_means, std=data_vars)
-    ])
-
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=data_means, std=data_vars)])
     # Load datasets with the transformation applied
     train_dataset = DatasetClass(root="./data", train=True, download=True, transform=transform)
     test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
-
-    # Concatenate datasets if needed
     full_dataset = ConcatDataset([train_dataset, test_dataset])
-
     return train_dataset, test_dataset, full_dataset
+
+
+def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size: int) -> Tuple[DataLoader, ...]:
+    return tuple([DataLoader(dataset, batch_size=batch_size, shuffle=False) for dataset in list_of_datasets])
 
 
 def calculate_percentiles(stats, stragglers_stats):
@@ -66,10 +57,6 @@ def calculate_percentiles(stats, stragglers_stats):
                 percentiles[key].append(percentile)
 
     return percentiles
-
-
-def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size: int) -> Tuple[DataLoader, ...]:
-    return tuple([DataLoader(dataset, batch_size=batch_size, shuffle=False) for dataset in list_of_datasets])
 
 
 def generate_spiral_data(n_points, noise=0.5):
@@ -204,7 +191,6 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     train_data, train_targets = final_train_data[train_permutation], final_train_targets[train_permutation]
     train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=70000, shuffle=True)
     # Create test loaders
-    test_loaders = []
     datasets = [(initial_test_stragglers_data, initial_test_stragglers_target),
                 (initial_test_non_stragglers_data, initial_test_non_stragglers_target)]
     full_test_data = torch.cat((datasets[0][0], datasets[1][0]), dim=0)  # Concatenate data
@@ -214,40 +200,61 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     for data, target in [(full_test_data, full_test_targets)] + datasets:
         test_loader = DataLoader(TensorDataset(data, target), batch_size=1000, shuffle=False)
         test_loaders.append(test_loader)
-
     return train_loader, test_loaders
 
 
-def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggler_target, non_straggler_data,
-                                      non_straggler_target, split_ratio, reduce_stragglers):
+def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, straggler_target, non_straggler_data,
+                                      non_straggler_target, split_ratio, reduce_stragglers, dataset_name,
+                                      test_accuracies_all_runs):
     generalisation_settings = ['full', 'stragglers', 'non_stragglers']
-    test_accuracies_all_runs = {setting: {ratio: [] for ratio in straggler_ratios}
-                                for setting in generalisation_settings}
-    for ratio in straggler_ratios:
+    for reduce_train_ratio in reduce_train_ratios:
         accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
-        for _ in range(2):  # Train 5 models with different initializations
-            train_loader, test_loaders = create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data,
-                                                                                 straggler_target, non_straggler_target,
-                                                                                 split_ratio, ratio, reduce_stragglers)
-            # Prepare for training
-            model = SimpleNN(28 * 28, 2, 40, 1).to(DEVICE)
-            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        train_loader, test_loaders = create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data,
+                                                                             straggler_target, non_straggler_target,
+                                                                             split_ratio, reduce_train_ratio,
+                                                                             reduce_stragglers)
+        for _ in range(2):  # Train 2 times to make sure results are initialization invariant.
+            if dataset_name == 'CIFAR10':
+                model = SimpleNN(32 * 32 * 3, 8, 20, 1)
+                optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
+            else:
+                model = SimpleNN(28 * 28, 2, 20, 1)
+                optimizer = optim.SGD(model.parameters(), lr=0.1)
             criterion = torch.nn.CrossEntropyLoss()
-            num_epochs = 500
             # Train the model
-            train_model(model, train_loader, optimizer, criterion, num_epochs, False)
+            train_model(model, train_loader, optimizer, criterion, EPOCHS, False)
             # Evaluate the model on test sets
             for i in range(3):
                 accuracy = test(model, test_loaders[i], False)
                 accuracies_for_ratio[i].append(accuracy)
         for i in range(3):
-            test_accuracies_all_runs[generalisation_settings[i]][ratio] = accuracies_for_ratio[i]
-    # Compute the average and standard deviation of accuracies for each ratio
-    avg_accuracies = {generalisation_settings[i]: [np.mean(test_accuracies_all_runs[generalisation_settings[i]][ratio])
-                                                   for ratio in straggler_ratios] for i in range(3)}
-    std_accuracies = {generalisation_settings[i]: [np.std(test_accuracies_all_runs[generalisation_settings[i]][ratio])
-                                                   for ratio in straggler_ratios] for i in range(3)}
-    return avg_accuracies, std_accuracies
+            test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
+
+
+def identify_hard_samples(strategy, model, test_loader, optimizer, criterion, full_dataset):
+    stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
+    stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
+    non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
+    non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
+    data, target = test_loader
+    data, target = data.to(DEVICE), target.to(DEVICE)
+    if strategy == 'stragglers':
+        models = train_stop_at_inversion(model, test_loader, optimizer, criterion, EPOCHS)
+        stragglers = [None for _ in range(10)]
+        for i in range(10):
+            if models[i] is not None:
+                stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))
+                current_non_stragglers = (torch.argmax(model(data), dim=1) == target) & (target == i)
+                # Concatenate the straggler data and targets
+                stragglers_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
+                stragglers_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
+                # Concatenate the non-straggler data and targets
+                non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
+                non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
+    elif strategy == "model":
+        stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
+            identify_hard_samples_with_model_accuracy(model, full_dataset, optimizer, criterion, EPOCHS))
+    return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
 def plot_statistics(stats, scatter_points=None, i=None, fig=None, axs=None):
