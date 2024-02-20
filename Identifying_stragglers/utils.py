@@ -219,19 +219,21 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
 
 
 def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggler_target, non_straggler_data,
-                                      non_straggler_target, split_ratio):
-    settings = ['full', 'stragglers', 'non_stragglers']
-    test_accuracies_all_runs = {setting: {ratio: [] for ratio in straggler_ratios} for setting in settings}
+                                      non_straggler_target, split_ratio, reduce_stragglers):
+    generalisation_settings = ['full', 'stragglers', 'non_stragglers']
+    test_accuracies_all_runs = {setting: {ratio: [] for ratio in straggler_ratios}
+                                for setting in generalisation_settings}
     for ratio in straggler_ratios:
         accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
         for _ in range(2):  # Train 5 models with different initializations
-            train_loader, test_loaders = create_dataloaders_with_straggler_ratio(
-                straggler_data, non_straggler_data, straggler_target, non_straggler_target, split_ratio, ratio)
+            train_loader, test_loaders = create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data,
+                                                                                 straggler_target, non_straggler_target,
+                                                                                 split_ratio, ratio, reduce_stragglers)
             # Prepare for training
             model = SimpleNN(28 * 28, 2, 40, 1).to(DEVICE)
             optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
             criterion = torch.nn.CrossEntropyLoss()
-            num_epochs = 200
+            num_epochs = 500
             # Train the model
             train_model(model, train_loader, optimizer, criterion, num_epochs, False)
             # Evaluate the model on test sets
@@ -239,12 +241,12 @@ def straggler_ratio_vs_generalisation(straggler_ratios, straggler_data, straggle
                 accuracy = test(model, test_loaders[i], False)
                 accuracies_for_ratio[i].append(accuracy)
         for i in range(3):
-            test_accuracies_all_runs[settings[i]][ratio] = accuracies_for_ratio[i]
+            test_accuracies_all_runs[generalisation_settings[i]][ratio] = accuracies_for_ratio[i]
     # Compute the average and standard deviation of accuracies for each ratio
-    avg_accuracies = {settings[i]: [np.mean(test_accuracies_all_runs[settings[i]][ratio]) for ratio in straggler_ratios]
-                      for i in range(3)}
-    std_accuracies = {settings[i]: [np.std(test_accuracies_all_runs[settings[i]][ratio]) for ratio in straggler_ratios]
-                      for i in range(3)}
+    avg_accuracies = {generalisation_settings[i]: [np.mean(test_accuracies_all_runs[generalisation_settings[i]][ratio])
+                                                   for ratio in straggler_ratios] for i in range(3)}
+    std_accuracies = {generalisation_settings[i]: [np.std(test_accuracies_all_runs[generalisation_settings[i]][ratio])
+                                                   for ratio in straggler_ratios] for i in range(3)}
     return avg_accuracies, std_accuracies
 
 
@@ -386,7 +388,7 @@ def create_data_splits(full_dataset, estimated_stragglers):
 
 def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True, test_loader=None):
     epoch_radii, error_radii = [], []
-    for epoch in range(epochs):
+    for epoch in tqdm(range(epochs)):
         model.train()
         for data, target in train_loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
@@ -501,16 +503,14 @@ def test(model, test_loader, single_batch=True):
 
 
 def plot_radii(X_type, all_radii, save=False):
-    start_color = (0, 0, 0)
-    end_color = (192, 192, 192)  # This represents a silver color
-    colors = interpolate_colors(start_color, end_color, len(all_radii))
+    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(all_radii)))  # Darker to lighter blues
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     for run_index in range(len(all_radii)):
         radii = all_radii[run_index]
         for i, ax in enumerate(axes.flatten()):
             y = [radii[j][1][i] for j in range(len(radii))]
             X = [radii[j][0] for j in range(len(radii))]
-            ax.plot(X, y, marker='o', color=colors[run_index])
+            ax.plot(X, y, color=colors[run_index])
             if run_index == 0:
                 ax.set_title(f'Class {i} Radii Over {X_type}')
                 ax.set_xlabel(X_type)
