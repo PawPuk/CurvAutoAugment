@@ -214,7 +214,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              straggler_target, non_straggler_target,
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
-        for _ in range(2):  # Train 2 times to make sure results are initialization invariant.
+        for _ in range(3):  # Train 3 times to make sure results are initialization invariant.
             if dataset_name == 'CIFAR10':
                 model = SimpleNN(32 * 32 * 3, 8, 20, 1)
                 optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
