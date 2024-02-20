@@ -1,16 +1,12 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import tqdm
 
-from neural_networks import SimpleNN
 from utils import (load_data, identify_hard_samples, straggler_ratio_vs_generalisation,
                    transform_datasets_to_dataloaders)
 
 dataset_name = 'MNIST'
-strategy = "stragglers"  # choose from "stragglers", "model", "cluster"
+strategy = "model"  # choose from "stragglers", "model", "cluster"
 train_ratios = [0.7, 0.6]  # train:test ratio
 reduce_train_ratios = np.array([0, 0.05, 0.1, 0.2, 0.5, 0.8, 0.9, 1])  # removed train stragglers/non_stragglers (%)
 reduce_stragglers = True  # True/False - see the impact of reducing stragglers/non_stragglers on generalisation
@@ -64,7 +60,7 @@ for setting in generalisation_settings:
     plt.legend(title='Train:Test Ratio')
     plt.tight_layout()  # Adjust the padding between and around subplots.
     plt.savefig(f'Figures/generalisation_from_{["non_stragglers", "stragglers"][reduce_stragglers]}_to_{setting}_on_'
-                f'{dataset_name}.png')
+                f'{dataset_name}_using_{strategy}.png')
     plt.savefig(f'Figures/generalisation_from_{["non_stragglers", "stragglers"][reduce_stragglers]}_to_{setting}_on_'
-                f'{dataset_name}.pdf')
+                f'{dataset_name}_using_{strategy}.pdf')
     plt.clf()

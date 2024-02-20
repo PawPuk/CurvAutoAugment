@@ -249,22 +249,22 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset):
     non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     for data, target in loader:
         data, target = data.to(DEVICE), target.to(DEVICE)
-    if strategy == 'stragglers':
-        models = train_stop_at_inversion(model, loader, optimizer, criterion)
-        stragglers = [None for _ in range(10)]
-        for i in range(10):
-            if models[i] is not None:
-                stragglers[i] = ((torch.argmax(models[i](data), dim=1) != target) & (target == i))
-                current_non_stragglers = (torch.argmax(models[i](data), dim=1) == target) & (target == i)
-                # Concatenate the straggler data and targets
-                stragglers_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
-                stragglers_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
-                # Concatenate the non-straggler data and targets
-                non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
-                non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
-    elif strategy == "model":
+    models = train_stop_at_inversion(model, loader, optimizer, criterion)
+    stragglers = [None for _ in range(10)]
+    for i in range(10):
+        if models[i] is not None:
+            stragglers[i] = ((torch.argmax(models[i](data), dim=1) != target) & (target == i))
+            current_non_stragglers = (torch.argmax(models[i](data), dim=1) == target) & (target == i)
+            # Concatenate the straggler data and targets
+            stragglers_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
+            stragglers_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
+            # Concatenate the non-straggler data and targets
+            non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
+            non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
+
+    if strategy == "model":
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion))
+            identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, len(stragglers_data)))
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
@@ -457,7 +457,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion):
     return models
 
 
-def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, ):
+def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, number_of_stragglers):
     # Using KFold cross-validation to train and evaluate model
     kfold = KFold(n_splits=5, shuffle=True)
     results = []
@@ -494,8 +494,8 @@ def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criteri
                 results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
     # Identify and separate stragglers based on confidence
     results.sort(key=lambda x: x[1])  # Sort by confidence
-    stragglers_idx = [x[0] for x in results[:6000]]
-    non_stragglers_idx = [x[0] for x in results[6000:]]
+    stragglers_idx = [x[0] for x in results[:number_of_stragglers]]
+    non_stragglers_idx = [x[0] for x in results[number_of_stragglers:]]
     # Extract data and targets for stragglers and non-stragglers
     stragglers_data = torch.stack([dataset[i][0] for i in stragglers_idx], dim=0)
     stragglers_target = torch.tensor([dataset[i][1] for i in stragglers_idx])
