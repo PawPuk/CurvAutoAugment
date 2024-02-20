@@ -1,3 +1,4 @@
+import copy
 import pickle
 from typing import List, Union, Tuple
 
@@ -222,7 +223,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                 optimizer = optim.SGD(model.parameters(), lr=0.1)
             criterion = torch.nn.CrossEntropyLoss()
             # Train the model
-            train_model(model, train_loader, optimizer, criterion, EPOCHS, False)
+            train_model(model, train_loader, optimizer, criterion, False)
             # Evaluate the model on test sets
             for i in range(3):
                 accuracy = test(model, test_loaders[i], False)
@@ -231,15 +232,15 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
 
 
-def identify_hard_samples(strategy, model, test_loader, optimizer, criterion, full_dataset):
+def identify_hard_samples(strategy, model, loader, optimizer, criterion, dataset):
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
-    data, target = test_loader
-    data, target = data.to(DEVICE), target.to(DEVICE)
+    for data, target in loader:
+        data, target = data.to(DEVICE), target.to(DEVICE)
     if strategy == 'stragglers':
-        models = train_stop_at_inversion(model, test_loader, optimizer, criterion, EPOCHS)
+        models = train_stop_at_inversion(model, loader, optimizer, criterion)
         stragglers = [None for _ in range(10)]
         for i in range(10):
             if models[i] is not None:
@@ -253,7 +254,7 @@ def identify_hard_samples(strategy, model, test_loader, optimizer, criterion, fu
                 non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
     elif strategy == "model":
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples_with_model_accuracy(model, full_dataset, optimizer, criterion, EPOCHS))
+            identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion))
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
@@ -393,9 +394,9 @@ def create_data_splits(full_dataset, estimated_stragglers):
     return splits
 
 
-def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=True, test_loader=None):
+def train_model(model, train_loader, optimizer, criterion, single_batch=True, test_loader=None):
     epoch_radii, error_radii = [], []
-    for epoch in tqdm(range(epochs)):
+    for epoch in range(EPOCHS):
         model.train()
         for data, target in train_loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
@@ -418,10 +419,11 @@ def train_model(model, train_loader, optimizer, criterion, epochs, single_batch=
     return epoch_radii, error_radii
 
 
-def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
+def train_stop_at_inversion(model, train_loader, optimizer, criterion):
     prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
                                  [None for _ in range(10)])
     count = 0
+    epochs = copy.copy(EPOCHS)
     while None in models and epochs > 0:
         model.train()
         for data, target in train_loader:
@@ -445,9 +447,9 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion, epochs):
     return models
 
 
-def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, num_epochs):
+def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, ):
     # Using KFold cross-validation to train and evaluate model
-    kfold = KFold(n_splits=2, shuffle=True)
+    kfold = KFold(n_splits=5, shuffle=True)
     results = []
     dataset_size = len(dataset)
     indices = list(range(dataset_size))
@@ -459,7 +461,7 @@ def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criteri
         full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
         # Training phase
         model.train()
-        for epoch in range(num_epochs):
+        for epoch in range(EPOCHS):
             for data, target in full_loader:
                 data, target = data.to(DEVICE), target.to(DEVICE)
                 optimizer.zero_grad()

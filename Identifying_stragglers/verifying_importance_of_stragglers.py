@@ -9,8 +9,12 @@ from neural_networks import SimpleNN
 from utils import (load_data, identify_hard_samples, straggler_ratio_vs_generalisation,
                    transform_datasets_to_dataloaders)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dataset_name = 'MNIST'
+strategy = "stragglers"  # choose from "stragglers", "model", "cluster"
+train_ratios = [0.7, 0.6]  # train:test ratio
+reduce_train_ratios = np.array([0, 0.05, 0.1, 0.2, 0.5, 0.8, 0.9, 1])  # removed train stragglers/non_stragglers (%)
+reduce_stragglers = True  # True/False - see the impact of reducing stragglers/non_stragglers on generalisation
+
 # Load the dataset. Use full batch.
 train_dataset, test_dataset, full_dataset = load_data(dataset_name)
 train_loader, test_loader, full_loader = transform_datasets_to_dataloaders(
@@ -22,17 +26,12 @@ if dataset_name == 'CIFAR10':
 else:
     model = SimpleNN(28*28, 2, 20, 1)
     optimizer = optim.SGD(model.parameters(), lr=0.1)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 criterion = nn.CrossEntropyLoss()
-# Run the training process
-strategy = "stragglers"  # choose from "stragglers", "model", "cluster"
-# Calculate the number of steps in your gradient
-train_ratios = [0.9, 0.8, 0.7, 0.6]
+# Define edge colors and select a colormap for the gradients
 n_ratios = len(train_ratios)
-# Define your edge colors and select a colormap for the gradients
-reduce_train_ratios = np.array([0, 0.25, 0.5, 0.75, 1])  # Define the ratios
 colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(train_ratios)))  # Darker to lighter blues
-reduce_stragglers = False  # True/False - see the impact of reducing stragglers/non_stragglers on generalisation
 generalisation_settings = ['full', 'stragglers', 'non_stragglers']
 total_avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in generalisation_settings}
 total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in generalisation_settings}
@@ -40,7 +39,7 @@ total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setti
 for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
     test_accuracies_all_runs = {setting: {reduce_train_ratio: [] for reduce_train_ratio in reduce_train_ratios}
                                 for setting in generalisation_settings}
-    for run_index in range(2):  # repeat 2 times to make sure that different straggler sets give similar results
+    for run_index in tqdm.tqdm(range(2), desc='Repeating the experiment for different straggler sets'):
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
             identify_hard_samples(strategy, model, test_loader, optimizer, criterion, full_dataset))
         print(f'A total of {len(stragglers_data)} stragglers and {len(non_stragglers_data)} non-stragglers were found.')
@@ -65,7 +64,7 @@ for setting in generalisation_settings:
     for idx in range(len(train_ratios)):
         ratio = train_ratios[idx]
         plt.errorbar(reduce_train_ratios, total_avg_accuracies[setting][ratio], yerr=total_std_accuracies[setting][ratio],
-                     label=f'Train:Test={int(10*ratio)}:{int(10*(1-ratio))}', marker='o', markersize=5, capsize=5,
+                     label=f'Train:Test={int(100*ratio)}:{100-int(100*ratio)}', marker='o', markersize=5, capsize=5,
                      linewidth=2, color=colors[idx])
     plt.xlabel('Proportion of Stragglers Removed from Train Set', fontsize=14)
     plt.ylabel(f'Accuracy on {setting.capitalize()} Test Set (%)', fontsize=14)
