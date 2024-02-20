@@ -19,16 +19,6 @@ reduce_stragglers = True  # True/False - see the impact of reducing stragglers/n
 train_dataset, test_dataset, full_dataset = load_data(dataset_name)
 train_loader, test_loader, full_loader = transform_datasets_to_dataloaders(
     [train_dataset, test_dataset, full_dataset], 70000)
-# Instantiate the model, loss function, optimizer and learning rate scheduler
-if dataset_name == 'CIFAR10':
-    model = SimpleNN(32*32*3, 8, 20, 1)
-    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-else:
-    model = SimpleNN(28*28, 2, 20, 1)
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-criterion = nn.CrossEntropyLoss()
 # Define edge colors and select a colormap for the gradients
 n_ratios = len(train_ratios)
 colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(train_ratios)))  # Darker to lighter blues
@@ -41,7 +31,7 @@ for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through d
                                 for setting in generalisation_settings}
     for run_index in tqdm.tqdm(range(2), desc='Repeating the experiment for different straggler sets'):
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples(strategy, model, test_loader, optimizer, criterion, full_dataset))
+            identify_hard_samples(dataset_name, strategy, test_loader, full_dataset))
         print(f'A total of {len(stragglers_data)} stragglers and {len(non_stragglers_data)} non-stragglers were found.')
         straggler_ratio_vs_generalisation(reduce_train_ratios, stragglers_data, stragglers_target, non_stragglers_data,
                                           non_stragglers_target, train_ratio, reduce_stragglers, dataset_name,

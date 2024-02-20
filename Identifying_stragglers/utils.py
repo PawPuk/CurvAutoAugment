@@ -221,6 +221,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             else:
                 model = SimpleNN(28 * 28, 2, 20, 1)
                 optimizer = optim.SGD(model.parameters(), lr=0.1)
+            model.to(DEVICE)
             criterion = torch.nn.CrossEntropyLoss()
             # Train the model
             train_model(model, train_loader, optimizer, criterion, False)
@@ -232,7 +233,16 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
 
 
-def identify_hard_samples(strategy, model, loader, optimizer, criterion, dataset):
+def identify_hard_samples(dataset_name, strategy, loader, dataset):
+    if dataset_name == 'CIFAR10':
+        model = SimpleNN(32*32*3, 8, 20, 1)
+        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
+    else:
+        model = SimpleNN(28*28, 2, 20, 1)
+        optimizer = optim.SGD(model.parameters(), lr=0.1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    criterion = torch.nn.CrossEntropyLoss()
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
@@ -244,8 +254,8 @@ def identify_hard_samples(strategy, model, loader, optimizer, criterion, dataset
         stragglers = [None for _ in range(10)]
         for i in range(10):
             if models[i] is not None:
-                stragglers[i] = ((torch.argmax(model(data), dim=1) != target) & (target == i))
-                current_non_stragglers = (torch.argmax(model(data), dim=1) == target) & (target == i)
+                stragglers[i] = ((torch.argmax(models[i](data), dim=1) != target) & (target == i))
+                current_non_stragglers = (torch.argmax(models[i](data), dim=1) == target) & (target == i)
                 # Concatenate the straggler data and targets
                 stragglers_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
                 stragglers_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
