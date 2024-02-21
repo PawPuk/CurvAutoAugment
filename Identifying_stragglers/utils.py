@@ -190,7 +190,7 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     # Shuffle the final train dataset
     train_permutation = torch.randperm(final_train_data.size(0))
     train_data, train_targets = final_train_data[train_permutation], final_train_targets[train_permutation]
-    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=70000, shuffle=True)
+    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=len(final_train_data), shuffle=True)
     # Create test loaders
     datasets = [(initial_test_stragglers_data, initial_test_stragglers_target),
                 (initial_test_non_stragglers_data, initial_test_non_stragglers_target)]
@@ -214,7 +214,8 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              straggler_target, non_straggler_target,
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
-        for _ in range(3):  # Train 3 times to make sure results are initialization invariant.
+        print('Divided data into train and test split.')
+        for _ in tqdm(range(3), desc='Repeating the experiment for different model initialisations'):
             if dataset_name == 'CIFAR10':
                 model = SimpleNN(32 * 32 * 3, 8, 20, 1)
                 optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
@@ -247,12 +248,13 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset):
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
+    models = train_stop_at_inversion(model, loader, optimizer, criterion)
+    if None in models:  # Check if stragglers for all classes were found. If not repeat the search
+        return identify_hard_samples(dataset_name, strategy, loader, dataset)
+    stragglers = [None for _ in range(10)]
     for data, target in loader:
         data, target = data.to(DEVICE), target.to(DEVICE)
-    models = train_stop_at_inversion(model, loader, optimizer, criterion)
-    stragglers = [None for _ in range(10)]
-    for i in range(10):
-        if models[i] is not None:
+        for i in range(10):
             stragglers[i] = ((torch.argmax(models[i](data), dim=1) != target) & (target == i))
             current_non_stragglers = (torch.argmax(models[i](data), dim=1) == target) & (target == i)
             # Concatenate the straggler data and targets
@@ -429,7 +431,7 @@ def train_model(model, train_loader, optimizer, criterion, single_batch=True, te
     return epoch_radii, error_radii
 
 
-def train_stop_at_inversion(model, train_loader, optimizer, criterion):
+def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[SimpleNN]:
     prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
                                  [None for _ in range(10)])
     count = 0
