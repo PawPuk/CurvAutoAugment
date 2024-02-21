@@ -42,7 +42,12 @@ def load_data(dataset_name):
 
 
 def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size: int) -> Tuple[DataLoader, ...]:
-    return tuple([DataLoader(dataset, batch_size=batch_size, shuffle=False) for dataset in list_of_datasets])
+    loaders = []
+    for dataset in list_of_datasets:
+        loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+        for data, target in loader:
+            loaders.append(DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True))
+    return loaders
 
 
 def calculate_percentiles(stats, stragglers_stats):
@@ -214,7 +219,6 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              straggler_target, non_straggler_target,
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
-        print('Divided data into train and test split.')
         for _ in tqdm(range(3), desc='Repeating the experiment for different model initialisations'):
             if dataset_name == 'CIFAR10':
                 model = SimpleNN(32 * 32 * 3, 8, 20, 1)
@@ -431,12 +435,10 @@ def train_model(model, train_loader, optimizer, criterion, single_batch=True, te
     return epoch_radii, error_radii
 
 
-def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[SimpleNN]:
+def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[Union[SimpleNN, None]]:
     prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
                                  [None for _ in range(10)])
-    count = 0
-    epochs = copy.copy(EPOCHS)
-    while None in models and epochs > 0:
+    for epoch in range(EPOCHS):
         model.train()
         for data, target in train_loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
@@ -445,17 +447,13 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[S
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-            break
-        current_radii = model.radii(train_loader)
-        for key in current_radii.keys():
-            if models[key] is None and current_radii[key][0].item() > prev_radii[key][0].item() and count > 20:
-                models[key] = model.to(DEVICE)
-        epochs -= 1
-        count += 1
-        prev_radii = current_radii
-        """if len([x for x in models if x is not None]) > 0:
-            break"""
-        print(f'At most {epochs} epochs remaining. {len([x for x in models if x is not None])} models found.')
+        if epoch % 5 == 0:
+            current_radii = model.radii(train_loader)
+            for key in current_radii.keys():
+                if models[key] is None and current_radii[key][0].item() > prev_radii[key][0].item() and epoch > 20:
+                    models[key] = model.to(DEVICE)
+            prev_radii = current_radii
+        # print(f'At most {EPOCHS - epoch} epochs remaining. {len([x for x in models if x is not None])} models found.')
     return models
 
 
