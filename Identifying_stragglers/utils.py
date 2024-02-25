@@ -42,20 +42,28 @@ def load_data(dataset_name, noise_rate=0.0):
     initial_transform = transforms.Compose([transforms.ToTensor()])
     dataset = DatasetClass(root="./data", train=True, download=True, transform=initial_transform)
     # Calculate means and vars
-    tensors = [a[0] for n, a in enumerate(dataset)]
+    tensors = [a[0] for a in dataset]
     stacked_tensors = torch.stack(tensors)
     data_means = torch.mean(stacked_tensors, dim=(0, 2, 3))
     data_vars = torch.sqrt(torch.var(stacked_tensors, dim=(0, 2, 3)) + EPSILON)
     # Define transform with normalization
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=data_means, std=data_vars)])
-
-    # Load training dataset and introduce label noise
+    # Load training and test datasets with the transformation applied
     train_dataset = DatasetClass(root="./data", train=True, download=True, transform=transform)
     introduce_label_noise(train_dataset, noise_rate=noise_rate)
     # Load test dataset and introduce label noise
     test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
     introduce_label_noise(test_dataset, noise_rate=noise_rate)
-    full_dataset = ConcatDataset([train_dataset, test_dataset])
+    # Combine datasets into a single TensorDataset
+    train_data = torch.stack([train_dataset[i][0] for i in range(len(train_dataset))])
+    test_data = torch.stack([test_dataset[i][0] for i in range(len(test_dataset))])
+    full_data = torch.cat((train_data, test_data), dim=0)
+
+    train_targets = torch.tensor(train_dataset.targets)
+    test_targets = torch.tensor(test_dataset.targets)
+    full_targets = torch.cat((train_targets, test_targets), dim=0)
+
+    full_dataset = TensorDataset(full_data, full_targets)
     return train_dataset, test_dataset, full_dataset
 
 
