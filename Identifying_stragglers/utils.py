@@ -22,9 +22,23 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPOCHS = 500
 
 
-def load_data(dataset_name):
+def introduce_label_noise(dataset, noise_rate=0.0):
+    if 1 > noise_rate > 0:
+        for class_label in range(10):  # Assuming 10 classes for datasets like MNIST
+            class_indices = [i for i, label in enumerate(dataset.targets) if label == class_label]
+            num_noisy_labels = int(len(class_indices) * noise_rate)
+            noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
+            for idx in noisy_labels_indices:
+                new_label = np.random.randint(0, 10)
+                while new_label == dataset.targets[idx]:
+                    new_label = np.random.randint(0, 10)
+                dataset.targets[idx] = new_label
+    elif noise_rate != 0:
+        raise ValueError(f'The parameter noise_ratio has to be in [0, 1). Value {noise_rate} not allowed.')
+
+
+def load_data(dataset_name, noise_rate=0.0):
     DatasetClass = getattr(datasets, dataset_name)
-    # Initial dataset for mean/var calculation
     initial_transform = transforms.Compose([transforms.ToTensor()])
     dataset = DatasetClass(root="./data", train=True, download=True, transform=initial_transform)
     # Calculate means and vars
@@ -34,19 +48,27 @@ def load_data(dataset_name):
     data_vars = torch.sqrt(torch.var(stacked_tensors, dim=(0, 2, 3)) + EPSILON)
     # Define transform with normalization
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=data_means, std=data_vars)])
-    # Load datasets with the transformation applied
+
+    # Load training dataset and introduce label noise
     train_dataset = DatasetClass(root="./data", train=True, download=True, transform=transform)
+    introduce_label_noise(train_dataset, noise_rate=noise_rate)
+    # Load test dataset and introduce label noise
     test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
+    introduce_label_noise(test_dataset, noise_rate=noise_rate)
     full_dataset = ConcatDataset([train_dataset, test_dataset])
     return train_dataset, test_dataset, full_dataset
 
 
-def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size: int) -> Tuple[DataLoader, ...]:
+def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size=None) -> Tuple[DataLoader, ...]:
     loaders = []
     for dataset in list_of_datasets:
-        loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+        if batch_size is not None:
+            loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        else:
+            loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
         for data, target in loader:
             loaders.append(DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True))
+            break
     return loaders
 
 
@@ -204,7 +226,7 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     # Create test loaders based on the ordered datasets
     test_loaders = []
     for data, target in [(full_test_data, full_test_targets)] + datasets:
-        test_loader = DataLoader(TensorDataset(data, target), batch_size=1000, shuffle=False)
+        test_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
         test_loaders.append(test_loader)
     return train_loader, test_loaders
 
@@ -232,21 +254,20 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             train_model(model, train_loader, optimizer, criterion, False)
             # Evaluate the model on test sets
             for i in range(3):
-                accuracy = test(model, test_loaders[i], False)
+                accuracy = test(model, test_loaders[i])
                 accuracies_for_ratio[i].append(accuracy)
         for i in range(3):
             test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
 
 
-def identify_hard_samples(dataset_name, strategy, loader, dataset):
+def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
     if dataset_name == 'CIFAR10':
         model = SimpleNN(32*32*3, 8, 20, 1)
         optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
     else:
         model = SimpleNN(28*28, 2, 20, 1)
         optimizer = optim.SGD(model.parameters(), lr=0.1)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    model.to(DEVICE)
     criterion = torch.nn.CrossEntropyLoss()
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
@@ -254,7 +275,8 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset):
     non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     models = train_stop_at_inversion(model, loader, optimizer, criterion)
     if None in models:  # Check if stragglers for all classes were found. If not repeat the search
-        return identify_hard_samples(dataset_name, strategy, loader, dataset)
+        print('Have to restart because not all stragglers were found.')
+        return identify_hard_samples(dataset_name, strategy, loader, dataset, level)
     stragglers = [None for _ in range(10)]
     for data, target in loader:
         data, target = data.to(DEVICE), target.to(DEVICE)
@@ -267,10 +289,11 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset):
             # Concatenate the non-straggler data and targets
             non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
             non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
-
-    if strategy == "model":
+    print('Found stragglers.')
+    if strategy in ["softmax", "energy"]:
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, len(stragglers_data)))
+            identify_hard_samples_with_model_accuracy(
+                dataset_name, dataset, criterion, stragglers, strategy, level))
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
@@ -410,7 +433,7 @@ def create_data_splits(full_dataset, estimated_stragglers):
     return splits
 
 
-def train_model(model, train_loader, optimizer, criterion, single_batch=True, test_loader=None):
+def train_model(model, train_loader, optimizer, criterion, compute_radii=True, test_loader=None):
     epoch_radii, error_radii = [], []
     for epoch in range(EPOCHS):
         model.train()
@@ -421,9 +444,8 @@ def train_model(model, train_loader, optimizer, criterion, single_batch=True, te
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-            if single_batch:
-                break
-        if single_batch:
+            break
+        if compute_radii and epoch > 5:
             current_radii = model.radii(train_loader)
             if test_loader is not None:
                 current_error = 1 - 0.01 * (test(model, test_loader))
@@ -447,6 +469,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[U
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
+            break
         if epoch % 5 == 0:
             current_radii = model.radii(train_loader)
             for key in current_radii.keys():
@@ -457,22 +480,42 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[U
     return models
 
 
-def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criterion, number_of_stragglers):
-    # Using KFold cross-validation to train and evaluate model
+def calculate_energy(logits, T=1.0):
+    # Calculate the energy score based on logits
+    return -T * torch.logsumexp(logits / T, dim=1)
+
+
+def identify_hard_samples_with_model_accuracy(dataset_name, dataset, criterion, stragglers, mode, level='dataset'):
+    if mode not in ["softmax", "energy"]:
+        raise ValueError(f"The mode parameter must be 'softmax' or 'energy'; {mode} is not allowed.")
+    if level not in ['dataset', 'class']:
+        raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
+
     kfold = KFold(n_splits=5, shuffle=True)
     results = []
     dataset_size = len(dataset)
-    indices = list(range(dataset_size))
-    for fold, (train_idx, test_idx) in enumerate(kfold.split(indices)):
+
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(dataset)):
+        # Reset model and optimizer for each fold
+        if dataset_name == 'CIFAR10':
+            model = SimpleNN(32 * 32 * 3, 8, 20, 1)
+            optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
+        else:
+            model = SimpleNN(28 * 28, 2, 20, 1)
+            optimizer = optim.SGD(model.parameters(), lr=0.1)
+        model.to(DEVICE)
         # Convert indices to boolean mask for simplicity
         train_mask = torch.zeros(dataset_size, dtype=bool)
         train_mask[train_idx] = True
         # DataLoader for the entire dataset for GD
         full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
+        new_loader = None
+        for data, target in full_loader:
+            new_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
         # Training phase
         model.train()
         for epoch in range(EPOCHS):
-            for data, target in full_loader:
+            for data, target in new_loader:
                 data, target = data.to(DEVICE), target.to(DEVICE)
                 optimizer.zero_grad()
                 output = model(data[train_mask])
@@ -484,27 +527,55 @@ def identify_hard_samples_with_model_accuracy(model, dataset, optimizer, criteri
         test_mask = torch.zeros(dataset_size, dtype=bool)
         test_mask[test_idx] = True
         with torch.no_grad():
-            for data, target in full_loader:
+            for data, target in new_loader:
                 data, target = data.to(DEVICE), target.to(DEVICE)
                 output = model(data[test_mask])
                 pred = output.argmax(dim=1, keepdim=True)
                 correct = pred.eq(target[test_mask].view_as(pred)).squeeze()
-                confidence = output.max(1)[0].cpu().numpy()
-                # Save results: index, confidence, correctness
-                results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
-    # Identify and separate stragglers based on confidence
-    results.sort(key=lambda x: x[1])  # Sort by confidence
-    stragglers_idx = [x[0] for x in results[:number_of_stragglers]]
-    non_stragglers_idx = [x[0] for x in results[number_of_stragglers:]]
-    # Extract data and targets for stragglers and non-stragglers
-    stragglers_data = torch.stack([dataset[i][0] for i in stragglers_idx], dim=0)
-    stragglers_target = torch.tensor([dataset[i][1] for i in stragglers_idx])
-    non_stragglers_data = torch.stack([dataset[i][0] for i in non_stragglers_idx], dim=0)
-    non_stragglers_target = torch.tensor([dataset[i][1] for i in non_stragglers_idx])
-    return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
+                if mode == 'energy':
+                    energy = calculate_energy(output).cpu().numpy()
+                    results.extend(list(zip(test_idx, energy, correct.cpu().numpy())))
+                else:
+                    confidence = output.max(1)[0].cpu().numpy()
+                    results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
+        if level == 'dataset':
+            stragglers_indices = select_stragglers_dataset_level(results, sum(stragglers), mode)
+        else:  # level == 'class'
+            stragglers_indices = select_stragglers_class_level(results, stragglers, mode, dataset)
+        # Extract data and targets for stragglers and non-stragglers
+        stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
+        for idx in stragglers_indices:
+            stragglers_data.append(dataset[idx][0])
+            stragglers_target.append(dataset[idx][1])
+
+        non_stragglers_indices = set(range(len(dataset))) - set(stragglers_indices)
+        for idx in non_stragglers_indices:
+            non_stragglers_data.append(dataset[idx][0])
+            non_stragglers_target.append(dataset[idx][1])
+
+        return torch.stack(stragglers_data), torch.tensor(stragglers_target), torch.stack(
+            non_stragglers_data), torch.tensor(non_stragglers_target)
 
 
-def test(model, test_loader, single_batch=True):
+def select_stragglers_dataset_level(results, num_stragglers, mode):
+    results.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
+    return [x[0] for x in results[:num_stragglers]]
+
+
+def select_stragglers_class_level(results, stragglers_per_class, mode, dataset):
+    class_results = {i: [] for i in range(10)}
+    for idx, score, correct in results:
+        class_label = dataset.targets[idx]
+        class_results[class_label].append((idx, score, correct))
+    stragglers_indices = []
+    for class_label, class_result in class_results.items():
+        class_result.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
+        num_stragglers = stragglers_per_class[class_label]
+        stragglers_indices.extend([x[0] for x in class_result[:num_stragglers]])
+    return stragglers_indices
+
+
+def test(model, test_loader):
     model.eval()
     correct, total = 0, 0
     with torch.no_grad():
@@ -514,14 +585,13 @@ def test(model, test_loader, single_batch=True):
             _, predicted = torch.max(outputs.data, 1)
             total += target.size(0)
             correct += (predicted == target).sum().item()
-            if single_batch:
-                break
+            break
     if total == 0:
         return -1
     return 100 * correct / total
 
 
-def plot_radii(X_type, all_radii, save=False):
+def plot_radii(X_type, all_radii, dataset_name, save=False):
     colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(all_radii)))  # Darker to lighter blues
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     for run_index in range(len(all_radii)):
@@ -529,7 +599,7 @@ def plot_radii(X_type, all_radii, save=False):
         for i, ax in enumerate(axes.flatten()):
             y = [radii[j][1][i] for j in range(len(radii))]
             X = [radii[j][0] for j in range(len(radii))]
-            ax.plot(X, y, color=colors[run_index])
+            ax.plot(X, y, color=colors[run_index], linewidth=3)
             if run_index == 0:
                 ax.set_title(f'Class {i} Radii Over {X_type}')
                 ax.set_xlabel(X_type)
@@ -537,8 +607,8 @@ def plot_radii(X_type, all_radii, save=False):
                 ax.grid(True)
     plt.tight_layout()
     if save:
-        plt.savefig(f'Figures/radii_over_{X_type}.png')
-        plt.savefig(f'Figures/radii_over_{X_type}.pdf')
+        plt.savefig(f'Figures/radii_over_{X_type}_on_{dataset_name}.png')
+        plt.savefig(f'Figures/radii_over_{X_type}_on_{dataset_name}.pdf')
 
 
 def plot_spiral_data(data, labels, title='Spiral Data'):
