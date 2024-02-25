@@ -1,4 +1,3 @@
-import copy
 import pickle
 from typing import List, Union, Tuple
 
@@ -54,20 +53,11 @@ def load_data(dataset_name, noise_rate=0.0):
     # Load test dataset and introduce label noise
     test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
     introduce_label_noise(test_dataset, noise_rate=noise_rate)
-    # Combine datasets into a single TensorDataset
-    train_data = torch.stack([train_dataset[i][0] for i in range(len(train_dataset))])
-    test_data = torch.stack([test_dataset[i][0] for i in range(len(test_dataset))])
-    full_data = torch.cat((train_data, test_data), dim=0)
-
-    train_targets = torch.tensor(train_dataset.targets)
-    test_targets = torch.tensor(test_dataset.targets)
-    full_targets = torch.cat((train_targets, test_targets), dim=0)
-
-    full_dataset = TensorDataset(full_data, full_targets)
+    full_dataset = ConcatDataset([train_dataset, test_dataset])
     return train_dataset, test_dataset, full_dataset
 
 
-def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size=None) -> Tuple[DataLoader, ...]:
+def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size=None) -> List[DataLoader]:
     loaders = []
     for dataset in list_of_datasets:
         if batch_size is not None:
@@ -239,6 +229,17 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     return train_loader, test_loaders
 
 
+def initialize_model(dataset_name):
+    if dataset_name == 'CIFAR10':
+        model = SimpleNN(32 * 32 * 3, 8, 20, 1)
+        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
+    else:
+        model = SimpleNN(28 * 28, 2, 20, 1)
+        optimizer = optim.SGD(model.parameters(), lr=0.1)
+    model.to(DEVICE)
+    return model, optimizer
+
+
 def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, straggler_target, non_straggler_data,
                                       non_straggler_target, split_ratio, reduce_stragglers, dataset_name,
                                       test_accuracies_all_runs):
@@ -250,13 +251,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
         for _ in tqdm(range(3), desc='Repeating the experiment for different model initialisations'):
-            if dataset_name == 'CIFAR10':
-                model = SimpleNN(32 * 32 * 3, 8, 20, 1)
-                optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-            else:
-                model = SimpleNN(28 * 28, 2, 20, 1)
-                optimizer = optim.SGD(model.parameters(), lr=0.1)
-            model.to(DEVICE)
+            model, optimizer = initialize_model(dataset_name)
             criterion = torch.nn.CrossEntropyLoss()
             # Train the model
             train_model(model, train_loader, optimizer, criterion, False)
@@ -269,13 +264,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
 
 
 def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
-    if dataset_name == 'CIFAR10':
-        model = SimpleNN(32*32*3, 8, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-    else:
-        model = SimpleNN(28*28, 2, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1)
-    model.to(DEVICE)
+    model, optimizer = initialize_model(dataset_name)
     criterion = torch.nn.CrossEntropyLoss()
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
@@ -502,16 +491,9 @@ def identify_hard_samples_with_model_accuracy(dataset_name, dataset, criterion, 
     kfold = KFold(n_splits=5, shuffle=True)
     results = []
     dataset_size = len(dataset)
-
-    for fold, (train_idx, test_idx) in enumerate(kfold.split(dataset)):
-        # Reset model and optimizer for each fold
-        if dataset_name == 'CIFAR10':
-            model = SimpleNN(32 * 32 * 3, 8, 20, 1)
-            optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-        else:
-            model = SimpleNN(28 * 28, 2, 20, 1)
-            optimizer = optim.SGD(model.parameters(), lr=0.1)
-        model.to(DEVICE)
+    indices = list(range(dataset_size))
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(indices)):
+        model, optimizer = initialize_model(dataset_name)
         # Convert indices to boolean mask for simplicity
         train_mask = torch.zeros(dataset_size, dtype=bool)
         train_mask[train_idx] = True
@@ -547,9 +529,11 @@ def identify_hard_samples_with_model_accuracy(dataset_name, dataset, criterion, 
                     confidence = output.max(1)[0].cpu().numpy()
                     results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
         if level == 'dataset':
-            stragglers_indices = select_stragglers_dataset_level(results, sum(stragglers), mode)
+            stragglers_indices = select_stragglers_dataset_level(
+                results, sum(tensor.sum().item() for tensor in stragglers), mode)
         else:  # level == 'class'
-            stragglers_indices = select_stragglers_class_level(results, stragglers, mode, dataset)
+            stragglers_indices = select_stragglers_class_level(
+                results, [tensor.sum().item() for tensor in stragglers], mode, dataset)
         # Extract data and targets for stragglers and non-stragglers
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
         for idx in stragglers_indices:
@@ -571,10 +555,11 @@ def select_stragglers_dataset_level(results, num_stragglers, mode):
 
 
 def select_stragglers_class_level(results, stragglers_per_class, mode, dataset):
+    targets = [label for _, label in dataset]
     class_results = {i: [] for i in range(10)}
     for idx, score, correct in results:
-        class_label = dataset.targets[idx]
-        class_results[class_label].append((idx, score, correct))
+        class_label = targets[idx]  # Use the passed targets list/tensor
+        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score, correct))
     stragglers_indices = []
     for class_label, class_result in class_results.items():
         class_result.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
