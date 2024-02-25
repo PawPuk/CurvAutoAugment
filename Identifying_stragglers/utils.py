@@ -36,38 +36,39 @@ def introduce_label_noise(dataset, noise_rate=0.0):
         raise ValueError(f'The parameter noise_ratio has to be in [0, 1). Value {noise_rate} not allowed.')
 
 
-def load_data(dataset_name, noise_rate=0.0):
-    DatasetClass = getattr(datasets, dataset_name)
-    initial_transform = transforms.Compose([transforms.ToTensor()])
-    dataset = DatasetClass(root="./data", train=True, download=True, transform=initial_transform)
-    # Calculate means and vars
-    tensors = [a[0] for a in dataset]
-    stacked_tensors = torch.stack(tensors)
-    data_means = torch.mean(stacked_tensors, dim=(0, 2, 3))
-    data_vars = torch.sqrt(torch.var(stacked_tensors, dim=(0, 2, 3)) + EPSILON)
-    # Define transform with normalization
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=data_means, std=data_vars)])
-    # Load training and test datasets with the transformation applied
-    train_dataset = DatasetClass(root="./data", train=True, download=True, transform=transform)
-    introduce_label_noise(train_dataset, noise_rate=noise_rate)
-    # Load test dataset and introduce label noise
-    test_dataset = DatasetClass(root="./data", train=False, download=True, transform=transform)
-    introduce_label_noise(test_dataset, noise_rate=noise_rate)
-    full_dataset = ConcatDataset([train_dataset, test_dataset])
-    return train_dataset, test_dataset, full_dataset
+def load_data_and_normalize(dataset_name, subset_size, noise_rate=0.0):
+    # Load the datasets
+    train_dataset = getattr(datasets, dataset_name)(root="./data", train=True, download=True, shuffle=True,
+                                                    transform=transforms.ToTensor())
+    test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True, shuffle=True,
+                                                   transform=transforms.ToTensor())
+    # Concatenate train and test datasets
+    full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
+    full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
+    # Shuffle the combined dataset
+    indices = torch.randperm(len(full_data))
+    full_data, full_targets = full_data[indices], full_targets[indices]
+    # Select a subset for normalization calculation
+    subset_data = full_data[:subset_size]
+    subset_targets = full_targets[:subset_size]
+    # Calculate mean and variance for the subset
+    data_means = torch.mean(subset_data, dim=(0, 2, 3)) / 255.0
+    data_vars = torch.sqrt(torch.var(subset_data, dim=(0, 2, 3)) / 255.0**2 + EPSILON)
+    # Define the normalization transform using calculated mean/var
+    normalize_transform = transforms.Normalize(mean=data_means, std=data_vars)
+    # Apply the normalization to the subset
+    normalized_subset_data = normalize_transform(subset_data / 255.0)  # Ensure data is scaled to [0, 1]
+    # Create a TensorDataset from the normalized subset
+    normalized_subset = TensorDataset(normalized_subset_data, subset_targets)
+    introduce_label_noise(normalized_subset, noise_rate)
+    return normalized_subset
 
 
-def transform_datasets_to_dataloaders(list_of_datasets: List[Dataset], batch_size=None) -> List[DataLoader]:
-    loaders = []
-    for dataset in list_of_datasets:
-        if batch_size is not None:
-            loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-        else:
-            loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
-        for data, target in loader:
-            loaders.append(DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True))
-            break
-    return loaders
+def transform_datasets_to_dataloaders(dataset: Dataset) -> DataLoader:
+    loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+    for data, target in loader:
+        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True)
+    return loader
 
 
 def calculate_percentiles(stats, stragglers_stats):
@@ -287,7 +288,7 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
             non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
             non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
     print('Found stragglers.')
-    if strategy in ["softmax", "energy"]:
+    if strategy in ["confidence", "energy"]:
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
             identify_hard_samples_with_model_accuracy(
                 dataset_name, dataset, criterion, stragglers, strategy, level))
@@ -483,8 +484,8 @@ def calculate_energy(logits, T=1.0):
 
 
 def identify_hard_samples_with_model_accuracy(dataset_name, dataset, criterion, stragglers, mode, level='dataset'):
-    if mode not in ["softmax", "energy"]:
-        raise ValueError(f"The mode parameter must be 'softmax' or 'energy'; {mode} is not allowed.")
+    if mode not in ["confidence", "energy"]:
+        raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {mode} is not allowed.")
     if level not in ['dataset', 'class']:
         raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
 
