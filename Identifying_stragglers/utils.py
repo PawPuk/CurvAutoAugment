@@ -22,26 +22,57 @@ EPOCHS = 500
 
 
 def introduce_label_noise(dataset, noise_rate=0.0):
-    if 1 > noise_rate > 0:
-        for class_label in range(10):  # Assuming 10 classes for datasets like MNIST
-            class_indices = [i for i, label in enumerate(dataset.targets) if label == class_label]
-            num_noisy_labels = int(len(class_indices) * noise_rate)
-            noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
-            for idx in noisy_labels_indices:
-                new_label = np.random.randint(0, 10)
-                while new_label == dataset.targets[idx]:
+    noisy_indices = []  # List to store indices of changed labels
+
+    # Check if dataset has 'targets' attribute (like torchvision datasets)
+    if hasattr(dataset, 'targets'):
+        if 1 > noise_rate > 0:
+            for class_label in range(10):  # Assuming 10 classes for simplicity
+                class_indices = [i for i, label in enumerate(dataset.targets) if label == class_label]
+                num_noisy_labels = int(len(class_indices) * noise_rate)
+                noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
+                for idx in noisy_labels_indices:
+                    original_label = dataset.targets[idx]
                     new_label = np.random.randint(0, 10)
-                dataset.targets[idx] = new_label
-    elif noise_rate != 0:
-        raise ValueError(f'The parameter noise_ratio has to be in [0, 1). Value {noise_rate} not allowed.')
+                    while new_label == original_label:
+                        new_label = np.random.randint(0, 10)
+                    dataset.targets[idx] = new_label
+                    noisy_indices.append(idx)  # Add index to list of noisy indices
+        elif noise_rate != 0:
+            raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
+    # Check if dataset is a TensorDataset
+    elif isinstance(dataset, TensorDataset):
+        if 1 > noise_rate > 0:
+            targets = dataset.tensors[1].clone().detach()
+            for class_label in range(10):
+                class_indices = (targets == class_label).nonzero(as_tuple=False).view(-1).tolist()
+                num_noisy_labels = int(len(class_indices) * noise_rate)
+                noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
+                for idx in noisy_labels_indices:
+                    original_label = targets[idx].item()
+                    new_label = np.random.randint(0, 10)
+                    while new_label == original_label:
+                        new_label = np.random.randint(0, 10)
+                    targets[idx] = new_label
+                    noisy_indices.append(idx)
+            # Update the dataset's targets
+            dataset.tensors = (dataset.tensors[0], targets)
+        elif noise_rate != 0:
+            raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
+    else:
+        raise TypeError("Dataset provided does not have a recognized structure for applying label noise.")
+
+    return noisy_indices
 
 
 def load_data_and_normalize(dataset_name, subset_size, noise_rate=0.0):
     # Load the datasets
-    train_dataset = getattr(datasets, dataset_name)(root="./data", train=True, download=True, shuffle=True,
+    train_dataset = getattr(datasets, dataset_name)(root="./data", train=True, download=True,
                                                     transform=transforms.ToTensor())
-    test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True, shuffle=True,
+    test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True,
                                                    transform=transforms.ToTensor())
+    introduce_label_noise(train_dataset, noise_rate)
+    introduce_label_noise(test_dataset, noise_rate)
     # Concatenate train and test datasets
     full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
     full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
@@ -60,7 +91,6 @@ def load_data_and_normalize(dataset_name, subset_size, noise_rate=0.0):
     normalized_subset_data = normalize_transform(subset_data / 255.0)  # Ensure data is scaled to [0, 1]
     # Create a TensorDataset from the normalized subset
     normalized_subset = TensorDataset(normalized_subset_data, subset_targets)
-    introduce_label_noise(normalized_subset, noise_rate)
     return normalized_subset
 
 
@@ -251,7 +281,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              straggler_target, non_straggler_target,
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
-        for _ in tqdm(range(3), desc='Repeating the experiment for different model initialisations'):
+        for _ in range(3):
             model, optimizer = initialize_model(dataset_name)
             criterion = torch.nn.CrossEntropyLoss()
             # Train the model
@@ -264,7 +294,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
 
 
-def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
+def identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio):
     model, optimizer = initialize_model(dataset_name)
     criterion = torch.nn.CrossEntropyLoss()
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
@@ -274,8 +304,8 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
     models = train_stop_at_inversion(model, loader, optimizer, criterion)
     if None in models:  # Check if stragglers for all classes were found. If not repeat the search
         print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(dataset_name, strategy, loader, dataset, level)
-    stragglers = [None for _ in range(10)]
+        return identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio)
+    stragglers = [0 for _ in range(10)]
     for data, target in loader:
         data, target = data.to(DEVICE), target.to(DEVICE)
         for i in range(10):
@@ -287,11 +317,18 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset, level):
             # Concatenate the non-straggler data and targets
             non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
             non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
-    print('Found stragglers.')
+    stragglers = [int(tensor.sum().item()) for tensor in stragglers]
+    print(f'Found {sum(stragglers)} stragglers.')
     if strategy in ["confidence", "energy"]:
+        # Introduce noise and increase the threshold
+        indices = introduce_label_noise(dataset, noise_ratio)
+        print(f'Added {len(indices)} label noise samples.')
+        for index in range(len(stragglers)):
+            stragglers[index] = stragglers[index] + int(noise_ratio * len(dataset) / len(stragglers))
+        print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
             identify_hard_samples_with_model_accuracy(
-                dataset_name, dataset, criterion, stragglers, strategy, level))
+                indices, dataset_name, dataset, criterion, stragglers, strategy, level))
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
@@ -483,74 +520,59 @@ def calculate_energy(logits, T=1.0):
     return -T * torch.logsumexp(logits / T, dim=1)
 
 
-def identify_hard_samples_with_model_accuracy(dataset_name, dataset, criterion, stragglers, mode, level='dataset'):
+def identify_hard_samples_with_model_accuracy(gt_indices, dataset_name, dataset, criterion, stragglers, mode,
+                                              level='dataset'):
     if mode not in ["confidence", "energy"]:
         raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {mode} is not allowed.")
     if level not in ['dataset', 'class']:
         raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
 
-    kfold = KFold(n_splits=5, shuffle=True)
     results = []
     dataset_size = len(dataset)
     indices = list(range(dataset_size))
-    for fold, (train_idx, test_idx) in enumerate(kfold.split(indices)):
-        model, optimizer = initialize_model(dataset_name)
-        # Convert indices to boolean mask for simplicity
-        train_mask = torch.zeros(dataset_size, dtype=bool)
-        train_mask[train_idx] = True
-        # DataLoader for the entire dataset for GD
-        full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
-        new_loader = None
-        for data, target in full_loader:
-            new_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
-        # Training phase
-        model.train()
-        for epoch in range(EPOCHS):
-            for data, target in new_loader:
-                data, target = data.to(DEVICE), target.to(DEVICE)
-                optimizer.zero_grad()
-                output = model(data[train_mask])
-                loss = criterion(output, target[train_mask])
-                loss.backward()
-                optimizer.step()
-        # Evaluation phase
-        model.eval()
-        test_mask = torch.zeros(dataset_size, dtype=bool)
-        test_mask[test_idx] = True
-        with torch.no_grad():
-            for data, target in new_loader:
-                data, target = data.to(DEVICE), target.to(DEVICE)
-                output = model(data[test_mask])
-                pred = output.argmax(dim=1, keepdim=True)
-                correct = pred.eq(target[test_mask].view_as(pred)).squeeze()
-                if mode == 'energy':
-                    energy = calculate_energy(output).cpu().numpy()
-                    results.extend(list(zip(test_idx, energy, correct.cpu().numpy())))
-                else:
-                    confidence = output.max(1)[0].cpu().numpy()
-                    results.extend(list(zip(test_idx, confidence, correct.cpu().numpy())))
-        if level == 'dataset':
-            stragglers_indices = select_stragglers_dataset_level(
-                results, sum(tensor.sum().item() for tensor in stragglers), mode)
-        else:  # level == 'class'
-            stragglers_indices = select_stragglers_class_level(
-                results, [tensor.sum().item() for tensor in stragglers], mode, dataset)
-        # Extract data and targets for stragglers and non-stragglers
-        stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
-        for idx in stragglers_indices:
-            stragglers_data.append(dataset[idx][0])
-            stragglers_target.append(dataset[idx][1])
-
-        non_stragglers_indices = set(range(len(dataset))) - set(stragglers_indices)
-        for idx in non_stragglers_indices:
-            non_stragglers_data.append(dataset[idx][0])
-            non_stragglers_target.append(dataset[idx][1])
-
-        return torch.stack(stragglers_data), torch.tensor(stragglers_target), torch.stack(
-            non_stragglers_data), torch.tensor(non_stragglers_target)
+    # Extract data and targets for stragglers and non-stragglers
+    stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
+    total_stragglers_indices = []
+    model, optimizer = initialize_model(dataset_name)
+    full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
+    new_loader = None
+    for data, target in full_loader:
+        new_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
+    train_model(model, new_loader, optimizer, criterion, False)
+    model.eval()
+    with torch.no_grad():
+        for data, target in new_loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
+            output = model(data)
+            pred = output.argmax(dim=1, keepdim=True)
+            correct = pred.eq(target.view_as(pred)).squeeze()
+            if mode == 'energy':
+                energy = calculate_energy(output).cpu().numpy()
+                results.extend(list(zip(range(len(dataset)), energy, correct.cpu().numpy())))
+            else:
+                confidence = output.max(1)[0].cpu().numpy()
+                results.extend(list(zip(range(len(dataset)), confidence, correct.cpu().numpy())))
+    if level == 'dataset':
+        stragglers_indices = select_stragglers_dataset_level(total_stragglers_indices, results, sum(stragglers), mode)
+    else:  # level == 'class'
+        stragglers_indices = select_stragglers_class_level(results, stragglers, mode, dataset)
+    total_stragglers_indices.extend(stragglers_indices)
+    for idx in stragglers_indices:
+        stragglers_data.append(dataset[idx][0])
+        stragglers_target.append(dataset[idx][1])
+    non_stragglers_indices = set(range(len(dataset))) - set(total_stragglers_indices)
+    for idx in non_stragglers_indices:
+        non_stragglers_data.append(dataset[idx][0])
+        non_stragglers_target.append(dataset[idx][1])
+    if len(gt_indices) > 0:
+        accuracy = len(set(total_stragglers_indices).intersection(gt_indices)) / len(gt_indices) * 100
+        print(f'Correctly guessed {accuracy}% of label noise '
+              f'({len(set(total_stragglers_indices).intersection(gt_indices))} out of {len(gt_indices)}).')
+    return torch.stack(stragglers_data), torch.tensor(stragglers_target), torch.stack(
+        non_stragglers_data), torch.tensor(non_stragglers_target)
 
 
-def select_stragglers_dataset_level(results, num_stragglers, mode):
+def select_stragglers_dataset_level(previous_straggler_indices, results, num_stragglers, mode):
     results.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
     return [x[0] for x in results[:num_stragglers]]
 
