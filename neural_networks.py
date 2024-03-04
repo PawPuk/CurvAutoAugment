@@ -15,8 +15,9 @@ class MyNN(torch.nn.Module):
     def latent_representation(self, X):
         pass
 
-    def radii(self, data_loader) -> Dict[int, List[Tensor]]:
-        radii = {i: [] for i in range(10)}
+    def radii(self, data_loader) -> Dict[int, Tensor]:
+        # TODO: add mask to reduce complexity for train_stop_at_inversion
+        radii = {i: torch.tensor(0) for i in range(10)}
         for data, target in data_loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
             with torch.no_grad():
@@ -28,7 +29,7 @@ class MyNN(torch.nn.Module):
                     class_data = torch.nn.functional.normalize(class_data, dim=1)
                     # computation of the metric quantities
                     class_data_mean = torch.mean(class_data, dim=0)
-                    radii[i].append(torch.sqrt(torch.sum(torch.square(class_data - class_data_mean)) / nump))
+                    radii[i] = torch.sqrt(torch.sum(torch.square(class_data - class_data_mean)) / nump)
             break
         return radii
 

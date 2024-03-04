@@ -10,14 +10,14 @@ strategy = "confidence"  # choose from "stragglers", "confidence", "energy"
 dataset_name = 'MNIST'
 reduce_train_ratios = np.array([0, 0.05, 0.1, 0.15, 0.2])  # removed train stragglers/non_stragglers (%)
 reduce_stragglers = False  # True/False - see the impact of reducing stragglers/non_stragglers on generalisation
-level = 'class'  # Choose between 'class' and 'dataset' (only used when strategy is 'softmax' or 'energy')
+level = 'dataset'  # Choose between 'class' and 'dataset' (only used when strategy is 'softmax' or 'energy')
 noise_ratio = 0.05  # Has to be in [0, 1)
 
 # Load the dataset. Use full batch.
 if strategy == 'stragglers':
-    dataset = load_data_and_normalize(dataset_name, 20000, noise_ratio)
+    dataset = load_data_and_normalize(dataset_name, 40000, noise_ratio)
 else:
-    dataset = load_data_and_normalize(dataset_name, 20000, 0.0)
+    dataset = load_data_and_normalize(dataset_name, 40000, 0.0)
 loader = transform_datasets_to_dataloaders(dataset)
 # Define edge colors and select a colormap for the gradients
 n_ratios = len(train_ratios)
@@ -29,13 +29,13 @@ total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setti
 for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
     test_accuracies_all_runs = {setting: {reduce_train_ratio: [] for reduce_train_ratio in reduce_train_ratios}
                                 for setting in generalisation_settings}
-    for run_index in tqdm.tqdm(range(3), desc='Repeating the experiment for different straggler sets'):
+    for run_index in tqdm.tqdm(range(1), desc='Repeating the experiment for different straggler sets'):
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio))
+            identify_hard_samples(strategy, loader, dataset, level, noise_ratio))
         print(f'A total of {len(stragglers_data)} stragglers and {len(non_stragglers_data)} non-stragglers were found.')
-        """straggler_ratio_vs_generalisation(reduce_train_ratios, stragglers_data, stragglers_target, non_stragglers_data,
+        straggler_ratio_vs_generalisation(reduce_train_ratios, stragglers_data, stragglers_target, non_stragglers_data,
                                           non_stragglers_target, train_ratio, reduce_stragglers, dataset_name,
-                                          test_accuracies_all_runs)"""
+                                          test_accuracies_all_runs)
     print(test_accuracies_all_runs)
     # Compute the average and standard deviation of accuracies for each ratio
     avg_accuracies = {generalisation_settings[i]:

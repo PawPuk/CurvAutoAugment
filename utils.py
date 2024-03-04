@@ -3,7 +3,8 @@ from typing import Dict, List, Tuple, Union
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.optim as optim
+from torch import Tensor
+from torch.optim import SGD
 from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
@@ -37,7 +38,7 @@ def introduce_label_noise(dataset: Union[Dataset, TensorDataset], noise_rate: fl
     # Ensure targets is a tensor for uniform handling
     if isinstance(targets, list):
         targets = torch.tensor(targets)
-    # Dynamically compute the number of classes and their indices
+    # Dynamically compute the number of classes in the 'dataset' and their indices
     unique_classes = targets.unique().tolist()
     # Apply noise
     for class_label in unique_classes:
@@ -110,26 +111,26 @@ def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
     return loader
 
 
-def initialize_model() -> Tuple[SimpleNN, optim.SGD]:
+def initialize_model() -> Tuple[SimpleNN, SGD]:
     """ Used to initialize the model and optimizer.
 
     :return: initialized SimpleNN model and SGD optimizer
     """
     model = SimpleNN(28 * 28, 2, 20, 1)
-    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    optimizer = SGD(model.parameters(), lr=0.1)
     model.to(DEVICE)
     return model, optimizer
 
 
-def train_model(model: SimpleNN, loader: DataLoader, optimizer: optim.SGD,
-                compute_radii: bool = True) -> List[Tuple[int, Dict[int, List[torch.Tensor]]]]:
+def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
+                compute_radii: bool = True) -> List[Tuple[int, Dict[int, torch.Tensor]]]:
     """
 
-    :param model: Model to be trained
-    :param loader: Loader to be used for training
-    :param optimizer: Optimized to be used for training
-    :param compute_radii: Flag specifying if the user wants to compute the radii of class manifolds during training
-    :return: List of tuples of the form (epoch_index, radii_of_class_manifolds), where the radii are stored in a
+    :param model: model to be trained
+    :param loader: DataLoader to be used for training
+    :param optimizer: optimizer to be used for training
+    :param compute_radii: flag specifying if the user wants to compute the radii of class manifolds during training
+    :return: list of tuples of the form (epoch_index, radii_of_class_manifolds), where the radii are stored in a
     dictionary of the form {class_index: [torch.Tensor]}
     """
     epoch_radii = []
@@ -148,6 +149,164 @@ def train_model(model: SimpleNN, loader: DataLoader, optimizer: optim.SGD,
             current_radii = model.radii(loader)
             epoch_radii.append((epoch, current_radii))
     return epoch_radii
+
+
+def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD) -> Dict[int, Union[SimpleNN, None]]:
+    """ Train a model and monitor the radii of class manifolds. When an inversion point is identified for a class, save
+    the current state of the model to the 'model' list that is returned by this function.
+
+    :param model: this model will be used to find the inversion point
+    :param loader: the program will look for stragglers within the data in this loader
+    :param optimizer: used for training
+    :return: dictionary mapping an index of a class manifold to a model, which can be used to extract stragglers for
+    the given class
+    """
+    prev_radii, models = {class_idx: torch.tensor(float('inf')) for class_idx in range(10)}, {}
+    for epoch in range(EPOCHS):
+        model.train()
+        for data, target in loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = CRITERION(output, target)
+            loss.backward()
+            optimizer.step()
+        # To increase sustainability and reduce complexity we check for the inversion point every 5 epochs.
+        if epoch % 5 == 0:
+            # Compute radii of class manifolds at this epoch
+            current_radii = model.radii(loader)
+            for key in current_radii.keys():
+                # For each class see if the radii didn't increase -> reached inversion point. We only check after epoch
+                # 20 for the same reasons as in train_model()
+                if key in models.keys() and current_radii[key] > prev_radii[key] and epoch > 20:
+                    models[key] = model.to(DEVICE)
+            prev_radii = current_radii
+    return models
+
+
+def select_stragglers_dataset_level(previous_straggler_indices, results, num_stragglers, mode):
+    results.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
+    return [x[0] for x in results[:num_stragglers]]
+
+
+def select_stragglers_class_level(results, stragglers_per_class, mode, dataset):
+    targets = [label for _, label in dataset]
+    class_results = {i: [] for i in range(10)}
+    for idx, score, correct in results:
+        class_label = targets[idx]  # Use the passed targets list/tensor
+        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score, correct))
+    stragglers_indices = []
+    for class_label, class_result in class_results.items():
+        class_result.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
+        num_stragglers = stragglers_per_class[class_label]
+        stragglers_indices.extend([x[0] for x in class_result[:num_stragglers]])
+    return stragglers_indices
+
+
+def calculate_energy(logits: Tensor, temperature: float = 1.0):
+    # Calculate the energy score based on logits
+    return -temperature * torch.logsumexp(logits / temperature, dim=1)
+
+
+def identify_hard_samples_with_model_accuracy(gt_indices, dataset, stragglers, strategy, level):
+    # TODO: Add Cross-Validation. Make computation of energy and confidence truly class-level (when strategy == 'class')
+    if strategy not in ["confidence", "energy"]:
+        raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {strategy} is not allowed.")
+    if level not in ['dataset', 'class']:
+        raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
+
+    hard_data, hard_target, easy_data, easy_target, results, total_hard_indices = [], [], [], [], [], []
+    model, optimizer = initialize_model()
+    loader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+    for data, target in loader:  # This is done to increase the speed (works due to full-batch setting)
+        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
+    train_model(model, loader, optimizer, False)
+    model.eval()
+    # Iterate through the data samples in 'loader'; compute and save their confidence/energy (depending on 'strategy')
+    with torch.no_grad():
+        for data, target in loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
+            output = model(data)
+            pred = output.argmax(dim=1, keepdim=True)
+            correct = pred.eq(target.view_as(pred)).squeeze()
+            if strategy == 'energy':
+                energy = calculate_energy(output).cpu().numpy()
+                results.extend(list(zip(range(len(dataset)), energy, correct.cpu().numpy())))
+            else:
+                confidence = output.max(1)[0].cpu().numpy()
+                results.extend(list(zip(range(len(dataset)), confidence, correct.cpu().numpy())))
+    if level == 'dataset':
+        stragglers_indices = select_stragglers_dataset_level(total_hard_indices, results, sum(stragglers), strategy)
+    else:  # level == 'class'
+        stragglers_indices = select_stragglers_class_level(results, stragglers, strategy, dataset)
+    total_hard_indices.extend(stragglers_indices)
+    for idx in stragglers_indices:
+        hard_data.append(dataset[idx][0])
+        hard_target.append(dataset[idx][1])
+    easy_indices = set(range(len(dataset))) - set(total_hard_indices)
+    for idx in easy_indices:
+        easy_data.append(dataset[idx][0])
+        easy_target.append(dataset[idx][1])
+    if len(gt_indices) > 0:
+        accuracy = len(set(total_hard_indices).intersection(gt_indices)) / len(gt_indices) * 100
+        print(f'Correctly guessed {accuracy}% of label noise '
+              f'({len(set(total_hard_indices).intersection(gt_indices))} out of {len(gt_indices)}).')
+    return torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target)
+
+
+def identify_hard_samples(strategy: str, loader: DataLoader, dataset: TensorDataset, level: str,
+                          noise_ratio: float) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """ This function divides 'loader' (or 'dataset', depending on the used 'strategy') into hard and easy samples.
+
+    :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
+    'energy' allowed
+    :param loader: DataLoader that contains the data to be divided into easy and hard samples (used to find stragglers)
+    :param dataset: Dataset that contains the data to be divided into easy and hard samples (used in confidence- and
+    energy-based methods)
+    :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
+    :param noise_ratio: the ratio of the added label noise; used for confidence- and energy-based methods
+    :return: tuple containing the identified hard and easy samples
+    """
+    model, optimizer = initialize_model()
+    # The following are used to store all stragglers and non-stragglers
+    hard_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
+    hard_target = torch.tensor([], dtype=torch.long).to(DEVICE)
+    easy_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
+    easy_target = torch.tensor([], dtype=torch.long).to(DEVICE)
+    # Look for inversion point for each class manifold
+    models = train_stop_at_inversion(model, loader, optimizer)
+    # Check if stragglers for all classes were found. If not repeat the search
+    if set(models.keys()) != set(range(10)):
+        print('Have to restart because not all stragglers were found.')
+        return identify_hard_samples(strategy, loader, dataset, level, noise_ratio)
+    # The following is used to know the distribution of stragglers between classes
+    stragglers = [torch.tensor(False) for _ in range(10)]
+    # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
+    for data, target in loader:
+        data, target = data.to(DEVICE), target.to(DEVICE)
+        for class_idx in range(10):
+            # Find stragglers and non-stragglers for the class manifold
+            stragglers[class_idx] = ((torch.argmax(models[class_idx](data), dim=1) != target) & (target == class_idx))
+            current_non_stragglers = (torch.argmax(models[class_idx](data), dim=1) == target) & (target == class_idx)
+            # Save stragglers and non-stragglers from class 'class_idx' to the outer scope (outside of this for loop)
+            hard_data = torch.cat((hard_data, data[stragglers[class_idx]]), dim=0)
+            hard_target = torch.cat((hard_target, target[stragglers[class_idx]]), dim=0)
+            easy_data = torch.cat((easy_data, data[current_non_stragglers]), dim=0)
+            easy_target = torch.cat((easy_target, target[current_non_stragglers]), dim=0)
+    # Compute the class-level number of stragglers
+    stragglers = [int(tensor.sum().item()) for tensor in stragglers]
+    print(f'Found {sum(stragglers)} stragglers.')
+    if strategy in ["confidence", "energy"]:
+        # Introduce noise and increase the threshold
+        indices = introduce_label_noise(dataset, noise_ratio)
+        print(f'Poisoned {len(indices)} labels.')
+        for class_idx in range(len(stragglers)):
+            stragglers[class_idx] = stragglers[class_idx] + int(noise_ratio * len(dataset) / len(stragglers))
+        print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
+        hard_data, hard_target, easy_data, easy_target = identify_hard_samples_with_model_accuracy(indices, dataset,
+                                                                                                   stragglers, strategy,
+                                                                                                   level)
+    return hard_data, hard_target, easy_data, easy_target
 
 
 def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, straggler_target, non_straggler_target,
@@ -226,142 +385,6 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
             test_accuracies_all_runs[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
 
 
-def identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio):
-    model, optimizer = initialize_model()
-    stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
-    stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
-    non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
-    non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
-    models = train_stop_at_inversion(model, loader, optimizer)
-    if None in models:  # Check if stragglers for all classes were found. If not repeat the search
-        print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio)
-    stragglers = [0 for _ in range(10)]
-    for data, target in loader:
-        data, target = data.to(DEVICE), target.to(DEVICE)
-        for i in range(10):
-            stragglers[i] = ((torch.argmax(models[i](data), dim=1) != target) & (target == i))
-            current_non_stragglers = (torch.argmax(models[i](data), dim=1) == target) & (target == i)
-            # Concatenate the straggler data and targets
-            stragglers_data = torch.cat((stragglers_data, data[stragglers[i]]), dim=0)
-            stragglers_target = torch.cat((stragglers_target, target[stragglers[i]]), dim=0)
-            # Concatenate the non-straggler data and targets
-            non_stragglers_data = torch.cat((non_stragglers_data, data[current_non_stragglers]), dim=0)
-            non_stragglers_target = torch.cat((non_stragglers_target, target[current_non_stragglers]), dim=0)
-    stragglers = [int(tensor.sum().item()) for tensor in stragglers]
-    print(f'Found {sum(stragglers)} stragglers.')
-    if strategy in ["confidence", "energy"]:
-        # Introduce noise and increase the threshold
-        indices = introduce_label_noise(dataset, noise_ratio)
-        print(f'Added {len(indices)} label noise samples.')
-        for index in range(len(stragglers)):
-            stragglers[index] = stragglers[index] + int(noise_ratio * len(dataset) / len(stragglers))
-        print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
-        stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
-            identify_hard_samples_with_model_accuracy(
-                indices, dataset_name, dataset, stragglers, strategy, level))
-    return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
-
-
-def train_stop_at_inversion(model, train_loader, optimizer) -> List[Union[SimpleNN, None]]:
-    prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
-                                 [None for _ in range(10)])
-    for epoch in range(EPOCHS):
-        model.train()
-        for data, target in train_loader:
-            data, target = data.to(DEVICE), target.to(DEVICE)
-            optimizer.zero_grad()
-            output = model(data)
-            loss = CRITERION(output, target)
-            loss.backward()
-            optimizer.step()
-            break
-        if epoch % 5 == 0:
-            current_radii = model.radii(train_loader)
-            for key in current_radii.keys():
-                if models[key] is None and current_radii[key][0].item() > prev_radii[key][0].item() and epoch > 20:
-                    models[key] = model.to(DEVICE)
-            prev_radii = current_radii
-        # print(f'At most {EPOCHS - epoch} epochs remaining. {len([x for x in models if x is not None])} models found.')
-    return models
-
-
-def calculate_energy(logits, T=1.0):
-    # Calculate the energy score based on logits
-    return -T * torch.logsumexp(logits / T, dim=1)
-
-
-def identify_hard_samples_with_model_accuracy(gt_indices, dataset_name, dataset, stragglers, mode,
-                                              level='dataset'):
-    if mode not in ["confidence", "energy"]:
-        raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {mode} is not allowed.")
-    if level not in ['dataset', 'class']:
-        raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
-
-    results = []
-    dataset_size = len(dataset)
-    indices = list(range(dataset_size))
-    # Extract data and targets for stragglers and non-stragglers
-    stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
-    total_stragglers_indices = []
-    model, optimizer = initialize_model()
-    full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
-    new_loader = None
-    for data, target in full_loader:
-        new_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
-    train_model(model, new_loader, optimizer, False)
-    model.eval()
-    with torch.no_grad():
-        for data, target in new_loader:
-            data, target = data.to(DEVICE), target.to(DEVICE)
-            output = model(data)
-            pred = output.argmax(dim=1, keepdim=True)
-            correct = pred.eq(target.view_as(pred)).squeeze()
-            if mode == 'energy':
-                energy = calculate_energy(output).cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), energy, correct.cpu().numpy())))
-            else:
-                confidence = output.max(1)[0].cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), confidence, correct.cpu().numpy())))
-    if level == 'dataset':
-        stragglers_indices = select_stragglers_dataset_level(total_stragglers_indices, results, sum(stragglers), mode)
-    else:  # level == 'class'
-        stragglers_indices = select_stragglers_class_level(results, stragglers, mode, dataset)
-    total_stragglers_indices.extend(stragglers_indices)
-    for idx in stragglers_indices:
-        stragglers_data.append(dataset[idx][0])
-        stragglers_target.append(dataset[idx][1])
-    non_stragglers_indices = set(range(len(dataset))) - set(total_stragglers_indices)
-    for idx in non_stragglers_indices:
-        non_stragglers_data.append(dataset[idx][0])
-        non_stragglers_target.append(dataset[idx][1])
-    if len(gt_indices) > 0:
-        accuracy = len(set(total_stragglers_indices).intersection(gt_indices)) / len(gt_indices) * 100
-        print(f'Correctly guessed {accuracy}% of label noise '
-              f'({len(set(total_stragglers_indices).intersection(gt_indices))} out of {len(gt_indices)}).')
-    return torch.stack(stragglers_data), torch.tensor(stragglers_target), torch.stack(
-        non_stragglers_data), torch.tensor(non_stragglers_target)
-
-
-def select_stragglers_dataset_level(previous_straggler_indices, results, num_stragglers, mode):
-    results.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
-    return [x[0] for x in results[:num_stragglers]]
-
-
-def select_stragglers_class_level(results, stragglers_per_class, mode, dataset):
-    targets = [label for _, label in dataset]
-    class_results = {i: [] for i in range(10)}
-    for idx, score, correct in results:
-        class_label = targets[idx]  # Use the passed targets list/tensor
-        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score, correct))
-    stragglers_indices = []
-    for class_label, class_result in class_results.items():
-        class_result.sort(key=lambda x: x[1], reverse=(mode == 'energy'))
-        num_stragglers = stragglers_per_class[class_label]
-        stragglers_indices.extend([x[0] for x in class_result[:num_stragglers]])
-    return stragglers_indices
-
-
 def test(model, test_loader):
     model.eval()
     correct, total = 0, 0
@@ -378,7 +401,7 @@ def test(model, test_loader):
     return 100 * correct / total
 
 
-def plot_radii(X_type, all_radii, dataset_name, save=False):
+def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], dataset_name: str, save: bool = False):
     colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(all_radii)))  # Darker to lighter blues
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     for run_index in range(len(all_radii)):
@@ -388,11 +411,11 @@ def plot_radii(X_type, all_radii, dataset_name, save=False):
             X = [radii[j][0] for j in range(len(radii))]
             ax.plot(X, y, color=colors[run_index], linewidth=3)
             if run_index == 0:
-                ax.set_title(f'Class {i} Radii Over {X_type}')
-                ax.set_xlabel(X_type)
+                ax.set_title(f'Class {i} Radii Over Epoch')
+                ax.set_xlabel('Epoch')
                 ax.set_ylabel('Radius')
                 ax.grid(True)
     plt.tight_layout()
     if save:
-        plt.savefig(f'Figures/radii_over_{X_type}_on_{dataset_name}.png')
-        plt.savefig(f'Figures/radii_over_{X_type}_on_{dataset_name}.pdf')
+        plt.savefig(f'Figures/radii_on_{dataset_name}.png')
+        plt.savefig(f'Figures/radii_on_{dataset_name}.pdf')

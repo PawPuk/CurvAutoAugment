@@ -19,7 +19,7 @@ def main(dataset_name: str, subset_size: int):
     # Save and plot the results
     with open('Results/all_epoch_radii.pkl', 'wb') as f:
         pickle.dump(all_epoch_radii, f)
-    plot_radii('Epoch', all_epoch_radii, dataset_name, True)
+    plot_radii(all_epoch_radii, dataset_name, False)
     plt.show()
 
 
