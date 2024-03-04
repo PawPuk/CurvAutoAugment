@@ -1,3 +1,6 @@
+from typing import Dict, List
+from torch import Tensor
+
 # This code is a modified version from https://github.com/marco-gherardi/stragglers
 import torch
 
@@ -12,7 +15,7 @@ class MyNN(torch.nn.Module):
     def latent_representation(self, X):
         pass
 
-    def radii(self, data_loader):
+    def radii(self, data_loader) -> Dict[int, List[Tensor]]:
         radii = {i: [] for i in range(10)}
         for data, target in data_loader:
             data, target = data.to(DEVICE), target.to(DEVICE)

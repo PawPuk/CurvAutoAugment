@@ -1,32 +1,34 @@
+import argparse
+import pickle
+
 import matplotlib.pyplot as plt
-import torch.nn as nn
-import torch.optim as optim
 from tqdm import tqdm
 
-from neural_networks import SimpleNN
-from utils import load_data, plot_radii, test, train_model, transform_datasets_to_dataloaders
+from utils import initialize_model, load_data_and_normalize, plot_radii, train_model, transform_datasets_to_dataloaders
 
-dataset_name = 'MNIST'
-# Load the dataset. We copy the batch size from the "Inversion dynamics of class manifolds in deep learning ..." paper
-train_dataset, test_dataset, full_dataset = load_data(dataset_name)
-train_loader, test_loader, full_loader = transform_datasets_to_dataloaders([train_dataset, test_dataset, full_dataset])
-all_epoch_radii, all_error_radii = [], []
-for _ in tqdm(range(5)):
-    # Instantiate the model, loss function, optimizer and learning rate scheduler
-    if dataset_name == 'CIFAR10':
-        model = SimpleNN(32 * 32 * 3, 8, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-    else:
-        model = SimpleNN(28 * 28, 2, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1)
-    criterion = nn.CrossEntropyLoss()
-    # Run the training process
-    epoch_radii, error_radii = train_model(model, full_loader, optimizer, criterion, test_loader=full_loader)
-    print(f'The model achieved the accuracy of {round(test(model, train_loader), 4)}% on the train set, and '
-          f'{round(test(model, test_loader), 4)}% on the test set')
-    all_epoch_radii.append(epoch_radii)
-    all_error_radii.append(error_radii)
-# Plot the results
-plot_radii('Epoch', all_epoch_radii, dataset_name, True)
-plot_radii('Error', all_error_radii, dataset_name, True)
-plt.show()
+
+def main(dataset_name: str, subset_size: int):
+    dataset = load_data_and_normalize(dataset_name, subset_size)
+    loader = transform_datasets_to_dataloaders(dataset)
+    all_epoch_radii = []
+    for _ in tqdm(range(5), desc='Investigating the dynamics of the radii of class manifolds for distinctly initialized'
+                                 ' networks'):
+        model, optimizer = initialize_model()
+        epoch_radii = train_model(model, loader, optimizer)
+        all_epoch_radii.append(epoch_radii)
+    # Save and plot the results
+    with open('Results/all_epoch_radii.pkl', 'wb') as f:
+        pickle.dump(all_epoch_radii, f)
+    plot_radii('Epoch', all_epoch_radii, dataset_name, True)
+    plt.show()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description='Investigate the dynamics of the radii of class manifolds for distinctly initialized networks.')
+    parser.add_argument('--dataset_name', type=str, default='MNIST',
+                        help='Name of the dataset to load. It has to be available in torchvision.datasets')
+    parser.add_argument('--subset_size', type=int, default=20000,
+                        help='Size of the subset to use for the analysis.')
+    args = parser.parse_args()
+    main(args.dataset_name, args.subset_size)

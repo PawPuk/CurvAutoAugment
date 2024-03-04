@@ -1,101 +1,153 @@
-import pickle
-from typing import List, Union
+from typing import Dict, List, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
-import scipy
 import torch
 import torch.optim as optim
-from torch.utils.data import ConcatDataset, Dataset, DataLoader, Subset, TensorDataset
+from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
-from tqdm import tqdm
 
 from neural_networks import SimpleNN
 
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPOCHS = 500
+CRITERION = torch.nn.CrossEntropyLoss()
 
 
-def introduce_label_noise(dataset, noise_rate=0.0):
+def introduce_label_noise(dataset: Union[Dataset, TensorDataset], noise_rate: float = 0.0) -> List[int]:
+    """ Adds noise to the dataset, and returns the list of indices of the so-creates noisy-labels.
+
+    :param dataset: Dataset or TensorDataset object which labels we want to poison
+    :param noise_rate: the ratio of the added label noise. After this, the dataset will contain (100*noise_rate)%
+    noisy-labels (assuming all labels were correct prior to calling this function)
+    :return: list of indices of the added noisy-labels
+    """
     noisy_indices = []  # List to store indices of changed labels
-
-    # Check if dataset has 'targets' attribute (like torchvision datasets)
+    # Verify if noise_ratio is in appropriate range
+    if not 1 > noise_rate >= 0:
+        raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
+    # Extract targets from the dataset
     if hasattr(dataset, 'targets'):
-        if 1 > noise_rate > 0:
-            for class_label in range(10):  # Assuming 10 classes for simplicity
-                class_indices = [i for i, label in enumerate(dataset.targets) if label == class_label]
-                num_noisy_labels = int(len(class_indices) * noise_rate)
-                noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
-                for idx in noisy_labels_indices:
-                    original_label = dataset.targets[idx]
-                    new_label = np.random.randint(0, 10)
-                    while new_label == original_label:
-                        new_label = np.random.randint(0, 10)
-                    dataset.targets[idx] = new_label
-                    noisy_indices.append(idx)  # Add index to list of noisy indices
-        elif noise_rate != 0:
-            raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
-    # Check if dataset is a TensorDataset
+        targets = dataset.targets
     elif isinstance(dataset, TensorDataset):
-        if 1 > noise_rate > 0:
-            targets = dataset.tensors[1].clone().detach()
-            for class_label in range(10):
-                class_indices = (targets == class_label).nonzero(as_tuple=False).view(-1).tolist()
-                num_noisy_labels = int(len(class_indices) * noise_rate)
-                noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
-                for idx in noisy_labels_indices:
-                    original_label = targets[idx].item()
-                    new_label = np.random.randint(0, 10)
-                    while new_label == original_label:
-                        new_label = np.random.randint(0, 10)
-                    targets[idx] = new_label
-                    noisy_indices.append(idx)
-            # Update the dataset's targets
-            dataset.tensors = (dataset.tensors[0], targets)
-        elif noise_rate != 0:
-            raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
+        targets = dataset.tensors[1]
     else:
         raise TypeError("Dataset provided does not have a recognized structure for applying label noise.")
-
+    # Ensure targets is a tensor for uniform handling
+    if isinstance(targets, list):
+        targets = torch.tensor(targets)
+    # Dynamically compute the number of classes and their indices
+    unique_classes = targets.unique().tolist()
+    # Apply noise
+    for class_label in unique_classes:
+        class_indices = torch.where(targets == class_label)[0].tolist()
+        num_noisy_labels = int(len(class_indices) * noise_rate)
+        noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
+        for idx in noisy_labels_indices:
+            original_label = targets[idx].item()
+            # Choose a new label different from the original
+            new_label_choices = [c for c in unique_classes if c != original_label]
+            new_label = np.random.choice(new_label_choices)
+            if hasattr(dataset, 'targets'):
+                dataset.targets[idx] = new_label
+            elif isinstance(dataset, TensorDataset):
+                dataset.tensors[1][idx] = new_label
+            noisy_indices.append(idx)
     return noisy_indices
 
 
-def load_data_and_normalize(dataset_name, subset_size, noise_rate=0.0):
-    # Load the datasets
+def load_data_and_normalize(dataset_name: str, subset_size: int, noise_rate: float = 0.0) -> TensorDataset:
+    """ Used to load the data from common datasets available in torchvision, and normalize them. The normalization
+    is based on the mean and std of a random subset of the dataset of the size subset_size.
+
+    :param dataset_name: name of the dataset to load. It has to be available in torchvision.datasets
+    :param subset_size: used when not working on the full dataset - the results will be less reliable, but the
+    complexity will be lowered
+    :param noise_rate: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
+    :return: random, normalized subset of dataset_name of size subset_size with (noise_rate*subset_size) labels changed
+    to introduce label noise
+    """
+    # Load the train and test datasets based on the 'dataset_name' parameter
     train_dataset = getattr(datasets, dataset_name)(root="./data", train=True, download=True,
                                                     transform=transforms.ToTensor())
     test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True,
                                                    transform=transforms.ToTensor())
+    # Add label noise
     introduce_label_noise(train_dataset, noise_rate)
     introduce_label_noise(test_dataset, noise_rate)
     # Concatenate train and test datasets
     full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
     full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
     # Shuffle the combined dataset
-    indices = torch.randperm(len(full_data))
-    full_data, full_targets = full_data[indices], full_targets[indices]
-    # Select a subset for normalization calculation
+    shuffled_indices = torch.randperm(len(full_data))
+    full_data, full_targets = full_data[shuffled_indices], full_targets[shuffled_indices]
+    # Select a subset based on the 'subset_size' parameter
     subset_data = full_data[:subset_size]
     subset_targets = full_targets[:subset_size]
     # Calculate mean and variance for the subset
     data_means = torch.mean(subset_data, dim=(0, 2, 3)) / 255.0
-    data_vars = torch.sqrt(torch.var(subset_data, dim=(0, 2, 3)) / 255.0**2 + EPSILON)
-    # Define the normalization transform using calculated mean/var
+    data_vars = torch.sqrt(torch.var(subset_data, dim=(0, 2, 3)) / 255.0 ** 2 + EPSILON)
+    # Apply the calculated normalization to the subset
     normalize_transform = transforms.Normalize(mean=data_means, std=data_vars)
-    # Apply the normalization to the subset
-    normalized_subset_data = normalize_transform(subset_data / 255.0)  # Ensure data is scaled to [0, 1]
-    # Create a TensorDataset from the normalized subset
+    normalized_subset_data = normalize_transform(subset_data / 255.0)
+    # Create a TensorDataset from the normalized subset. This will make the code significantly faster than passing the
+    # normalization transform to the DataLoader (as it's usually done).
     normalized_subset = TensorDataset(normalized_subset_data, subset_targets)
     return normalized_subset
 
 
-def transform_datasets_to_dataloaders(dataset: Dataset) -> DataLoader:
+def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
+    """ Transforms TensorDataset to DataLoader for bull-batch training. The below implementation makes full-batch
+    training faster than it would usually be.
+
+    :param dataset: TensorDataset to be transformed
+    :return: DataLoader version of dataset ready for full-batch training
+    """
     loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
     for data, target in loader:
         loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True)
     return loader
+
+
+def initialize_model() -> Tuple[SimpleNN, optim.SGD]:
+    """ Used to initialize the model and optimizer.
+
+    :return: initialized SimpleNN model and SGD optimizer
+    """
+    model = SimpleNN(28 * 28, 2, 20, 1)
+    optimizer = optim.SGD(model.parameters(), lr=0.1)
+    model.to(DEVICE)
+    return model, optimizer
+
+
+def train_model(model: SimpleNN, loader: DataLoader, optimizer: optim.SGD,
+                compute_radii: bool = True) -> List[Tuple[int, Dict[int, List[torch.Tensor]]]]:
+    """
+
+    :param model: Model to be trained
+    :param loader: Loader to be used for training
+    :param optimizer: Optimized to be used for training
+    :param compute_radii: Flag specifying if the user wants to compute the radii of class manifolds during training
+    :return: List of tuples of the form (epoch_index, radii_of_class_manifolds), where the radii are stored in a
+    dictionary of the form {class_index: [torch.Tensor]}
+    """
+    epoch_radii = []
+    for epoch in range(EPOCHS):
+        model.train()
+        for data, target in loader:
+            data, target = data.to(DEVICE), target.to(DEVICE)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = CRITERION(output, target)
+            loss.backward()
+            optimizer.step()
+        # Do not compute the radii for the first 20 epochs, as those can be unstable. The number 20 was taken from
+        # https://github.com/marco-gherardi/stragglers
+        if compute_radii and epoch > 20:
+            current_radii = model.radii(loader)
+            epoch_radii.append((epoch, current_radii))
+    return epoch_radii
 
 
 def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, straggler_target, non_straggler_target,
@@ -152,17 +204,6 @@ def create_dataloaders_with_straggler_ratio(straggler_data, non_straggler_data, 
     return train_loader, test_loaders
 
 
-def initialize_model(dataset_name):
-    if dataset_name == 'CIFAR10':
-        model = SimpleNN(32 * 32 * 3, 8, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.02)
-    else:
-        model = SimpleNN(28 * 28, 2, 20, 1)
-        optimizer = optim.SGD(model.parameters(), lr=0.1)
-    model.to(DEVICE)
-    return model, optimizer
-
-
 def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, straggler_target, non_straggler_data,
                                       non_straggler_target, split_ratio, reduce_stragglers, dataset_name,
                                       test_accuracies_all_runs):
@@ -174,10 +215,9 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
                                                                              split_ratio, reduce_train_ratio,
                                                                              reduce_stragglers)
         for _ in range(3):
-            model, optimizer = initialize_model(dataset_name)
-            criterion = torch.nn.CrossEntropyLoss()
+            model, optimizer = initialize_model()
             # Train the model
-            train_model(model, train_loader, optimizer, criterion, False)
+            train_model(model, train_loader, optimizer, False)
             # Evaluate the model on test sets
             for i in range(3):
                 accuracy = test(model, test_loaders[i])
@@ -187,13 +227,12 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios, straggler_data, strag
 
 
 def identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio):
-    model, optimizer = initialize_model(dataset_name)
-    criterion = torch.nn.CrossEntropyLoss()
+    model, optimizer = initialize_model()
     stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     non_stragglers_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     non_stragglers_target = torch.tensor([], dtype=torch.long).to(DEVICE)
-    models = train_stop_at_inversion(model, loader, optimizer, criterion)
+    models = train_stop_at_inversion(model, loader, optimizer)
     if None in models:  # Check if stragglers for all classes were found. If not repeat the search
         print('Have to restart because not all stragglers were found.')
         return identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_ratio)
@@ -220,35 +259,11 @@ def identify_hard_samples(dataset_name, strategy, loader, dataset, level, noise_
         print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
         stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = (
             identify_hard_samples_with_model_accuracy(
-                indices, dataset_name, dataset, criterion, stragglers, strategy, level))
+                indices, dataset_name, dataset, stragglers, strategy, level))
     return stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target
 
 
-def train_model(model, train_loader, optimizer, criterion, compute_radii=True, test_loader=None):
-    epoch_radii, error_radii = [], []
-    for epoch in range(EPOCHS):
-        model.train()
-        for data, target in train_loader:
-            data, target = data.to(DEVICE), target.to(DEVICE)
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            break
-        if compute_radii and epoch > 5:
-            current_radii = model.radii(train_loader)
-            if test_loader is not None:
-                current_error = 1 - 0.01 * (test(model, test_loader))
-            else:
-                current_error = 1 - 0.01 * (test(model, train_loader))
-            if current_error <= 0.5 or True:
-                epoch_radii.append((epoch, current_radii))
-                error_radii.append((current_error, current_radii))
-    return epoch_radii, error_radii
-
-
-def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[Union[SimpleNN, None]]:
+def train_stop_at_inversion(model, train_loader, optimizer) -> List[Union[SimpleNN, None]]:
     prev_radii, radii, models = ([[torch.tensor(float('inf'))] for _ in range(10)], [None for _ in range(10)],
                                  [None for _ in range(10)])
     for epoch in range(EPOCHS):
@@ -257,7 +272,7 @@ def train_stop_at_inversion(model, train_loader, optimizer, criterion) -> List[U
             data, target = data.to(DEVICE), target.to(DEVICE)
             optimizer.zero_grad()
             output = model(data)
-            loss = criterion(output, target)
+            loss = CRITERION(output, target)
             loss.backward()
             optimizer.step()
             break
@@ -276,7 +291,7 @@ def calculate_energy(logits, T=1.0):
     return -T * torch.logsumexp(logits / T, dim=1)
 
 
-def identify_hard_samples_with_model_accuracy(gt_indices, dataset_name, dataset, criterion, stragglers, mode,
+def identify_hard_samples_with_model_accuracy(gt_indices, dataset_name, dataset, stragglers, mode,
                                               level='dataset'):
     if mode not in ["confidence", "energy"]:
         raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {mode} is not allowed.")
@@ -289,12 +304,12 @@ def identify_hard_samples_with_model_accuracy(gt_indices, dataset_name, dataset,
     # Extract data and targets for stragglers and non-stragglers
     stragglers_data, stragglers_target, non_stragglers_data, non_stragglers_target = [], [], [], []
     total_stragglers_indices = []
-    model, optimizer = initialize_model(dataset_name)
+    model, optimizer = initialize_model()
     full_loader = torch.utils.data.DataLoader(dataset, batch_size=dataset_size, shuffle=False)
     new_loader = None
     for data, target in full_loader:
         new_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
-    train_model(model, new_loader, optimizer, criterion, False)
+    train_model(model, new_loader, optimizer, False)
     model.eval()
     with torch.no_grad():
         for data, target in new_loader:
