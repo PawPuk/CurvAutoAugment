@@ -184,11 +184,12 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
     return models
 
 
-def select_stragglers_dataset_level(results, num_stragglers: int, strategy: str) -> List[int]:
+def select_stragglers_dataset_level(results: List[Tuple[int, float]], num_stragglers: int,
+                                    strategy: str) -> List[int]:
     """ Extracts top 'num_stragglers' uncertain data samples. This works on a dataset-level, hence more hard samples
     might be identified for certain classes.
 
-    :param results:
+    :param results: list of tuples of the form (data_sample_index, energy/confidence)
     :param num_stragglers: threshold used to identify hard samples - we look for precisely this many hard samples
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
@@ -198,12 +199,12 @@ def select_stragglers_dataset_level(results, num_stragglers: int, strategy: str)
     return [x[0] for x in results[:num_stragglers]]
 
 
-def select_stragglers_class_level(results, stragglers_per_class: list[int], strategy: str,
+def select_stragglers_class_level(results: List[Tuple[int, float]], stragglers_per_class: List[int], strategy: str,
                                   dataset: TensorDataset) -> List[int]:
     """Extracts top 'num_stragglers' uncertain data samples. This works on a class-level, hence the results should be
      better (more precise) than for the dataset-level implementation.
 
-    :param results:
+    :param results: list of tuples of the form (data_sample_index, energy/confidence)
     :param stragglers_per_class: class-level threshold used to identify hard samples - we look for precisely this many
     hard samples within every class
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
@@ -224,7 +225,7 @@ def select_stragglers_class_level(results, stragglers_per_class: list[int], stra
     return stragglers_indices
 
 
-def calculate_energy(logits: Tensor, temperature: float = 1.0):
+def calculate_energy(logits: Tensor, temperature: float = 1.0) -> Tensor:
     # Calculate the energy score based on logits
     return -temperature * torch.logsumexp(logits / temperature, dim=1)
 
@@ -260,14 +261,12 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
         for data, target in loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
             output = model(data)
-            pred = output.argmax(dim=1, keepdim=True)
-            correct = pred.eq(target.view_as(pred)).squeeze()
             if strategy == 'energy':
                 energy = calculate_energy(output).cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), energy, correct.cpu().numpy())))
+                results.extend(list(zip(range(len(dataset)), energy,)))
             else:
                 confidence = output.max(1)[0].cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), confidence, correct.cpu().numpy())))
+                results.extend(list(zip(range(len(dataset)), confidence)))
     # Select the samples that the model is the least confident with either on a dataset- or class-level
     if level == 'dataset':
         stragglers_indices = select_stragglers_dataset_level(results, sum(stragglers), strategy)
@@ -289,21 +288,19 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
     return torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target)
 
 
-def identify_hard_samples(strategy: str, loader: DataLoader, dataset: TensorDataset, level: str,
-                          noise_ratio: float) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noise_ratio: float) -> List[Tensor]:
     """ This function divides 'loader' (or 'dataset', depending on the used 'strategy') into hard and easy samples.
 
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
-    :param loader: DataLoader that contains the data to be divided into easy and hard samples (used to find stragglers)
-    :param dataset: TensorDataset that contains the data to be divided into easy and hard samples (used in confidence-
-    and energy-based methods)
+    :param dataset: TensorDataset that contains the data to be divided into easy and hard samples
     :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
     :param noise_ratio: the ratio of the added label noise; used for confidence- and energy-based methods
-    :return: tuple containing the identified hard and easy samples
+    :return: list containing the identified hard and easy samples
     """
     # TODO: check how many noisy-labels straggler-based approach identified (so far we assume that the increase in
     #  straggler count comes from correctly identified noisy-labels, which might not be correct)
+    loader = transform_datasets_to_dataloaders(dataset)
     model, optimizer = initialize_model()
     # The following are used to store all stragglers and non-stragglers
     hard_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
@@ -315,7 +312,7 @@ def identify_hard_samples(strategy: str, loader: DataLoader, dataset: TensorData
     # Check if stragglers for all classes were found. If not repeat the search
     if set(models.keys()) != set(range(10)):
         print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(strategy, loader, dataset, level, noise_ratio)
+        return identify_hard_samples(strategy, dataset, level, noise_ratio)
     # The following is used to know the distribution of stragglers between classes
     stragglers = [torch.tensor(False) for _ in range(10)]
     # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
@@ -343,52 +340,64 @@ def identify_hard_samples(strategy: str, loader: DataLoader, dataset: TensorData
         # Identify hard an easy samples using confidence- or energy-based method
         hard_data, hard_target, easy_data, easy_target = (
             identify_hard_samples_with_model_accuracy(indices, dataset, stragglers, strategy, level))
-    return hard_data, hard_target, easy_data, easy_target
+    return [hard_data, hard_target, easy_data, easy_target]
 
 
 def create_dataloaders_with_straggler_ratio(hard_data: Tensor, easy_data: Tensor, hard_target: Tensor,
-                                            easy_target: Tensor, train_ratio: float, reduce_train_ratio: float,
-                                            reduce_stragglers: bool = True):
+                                            easy_target: Tensor, train_ratio: float, reduce_hard: bool,
+                                            remaining_train_ratio: float) -> Tuple[DataLoader, List[DataLoader]]:
+    """ This function divides easy and hard data samples into train and test sets.
+
+    :param hard_data: identifies hard samples (data)
+    :param hard_target: identified hard samples (target)
+    :param easy_data: identified easy samples (data)
+    :param easy_target: identified easy samples (target)
+    :param train_ratio: percentage of train set to whole dataset
+    :param reduce_hard: flag indicating whether we want to see the effect of changing the number of easy (False) or
+    hard (True) samples
+    :param remaining_train_ratio: ratio of easy/hard samples remaining in the train set (0.1 means that 90% of hard
+    samples will be removed from the pool of hard samples when generating train set, when reduce_hard == True)
+    :return: returns train loader and 3 test loaders - 1) with all data samples; 2) with only hard data samples; and 3)
+    with only easy data samples.
+    """
     # Randomly shuffle hard and easy samples
-    hard_perm = torch.randperm(hard_data.size(0))
-    easy_perm = torch.randperm(easy_data.size(0))
+    hard_perm, easy_perm = torch.randperm(hard_data.size(0)), torch.randperm(easy_data.size(0))
     hard_data, hard_target = hard_data[hard_perm], hard_target[hard_perm]
     easy_data, easy_target = easy_data[easy_perm], easy_target[easy_perm]
-    # Split data into initial train/test sets based on the split_ratio and make sure that split_ratio is correct
-    if not 0 <= train_ratio <= 1:
-        raise ValueError('The variable split_ratio must be between 0 and 1.')
+    # Split data into initial train/test sets based on the train_ratio and make sure that train_ratio is correct
+    if not 0 < train_ratio < 1:
+        raise ValueError(f'The parameter split_ratio must be in (0, 1); {train_ratio} not allowed.')
     train_size_hard = int(len(hard_data) * train_ratio)
     train_size_easy = int(len(easy_data) * train_ratio)
-
     hard_train_data, hard_test_data = hard_data[:train_size_hard], hard_data[train_size_hard:]
     hard_train_target, hard_test_target = hard_target[:train_size_hard], hard_target[train_size_hard:]
     easy_train_data, easy_test_data = easy_data[:train_size_easy], easy_data[train_size_easy:]
     easy_train_target, easy_test_target = easy_target[:train_size_easy], easy_target[train_size_easy:]
-    # Reduce the number of train samples by reduce_train_ratio
-    if not 0 <= reduce_train_ratio <= 1:
-        raise ValueError('The variable reduce_train_ratio must be between 0 and 1.')
-    if reduce_stragglers:
-        reduced_hard_train_size = int(train_size_hard * reduce_train_ratio)
+    # Reduce the number of train samples by remaining_train_ratio
+    if not 0 <= remaining_train_ratio <= 1:
+        raise ValueError(f'The parameter remaining_train_ratio must be in [0, 1]; {remaining_train_ratio} not allowed.')
+    if reduce_hard:
+        reduced_hard_train_size = int(train_size_hard * remaining_train_ratio)
         reduced_easy_train_size = train_size_easy
     else:
         reduced_hard_train_size = train_size_hard
-        reduced_easy_train_size = int(train_size_easy * reduce_train_ratio)
-
-    final_train_data = torch.cat((hard_train_data[:reduced_hard_train_size],
-                                  easy_train_data[:reduced_easy_train_size]), dim=0)
-    final_train_targets = torch.cat((hard_train_target[:reduced_hard_train_size],
-                                     easy_train_target[:reduced_easy_train_size]), dim=0)
+        reduced_easy_train_size = int(train_size_easy * remaining_train_ratio)
+    # Combine easy and hard samples into train and test data
+    train_data = torch.cat((hard_train_data[:reduced_hard_train_size],
+                            easy_train_data[:reduced_easy_train_size]), dim=0)
+    train_targets = torch.cat((hard_train_target[:reduced_hard_train_size],
+                               easy_train_target[:reduced_easy_train_size]), dim=0)
     # Shuffle the final train dataset
-    train_permutation = torch.randperm(final_train_data.size(0))
-    train_data, train_targets = final_train_data[train_permutation], final_train_targets[train_permutation]
-    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=len(final_train_data), shuffle=True)
-    # Create test loaders
-    datasets = [(hard_test_data, hard_test_target), (easy_test_data, easy_test_target)]
-    full_test_data = torch.cat((datasets[0][0], datasets[1][0]), dim=0)  # Concatenate data
-    full_test_targets = torch.cat((datasets[0][1], datasets[1][1]), dim=0)  # Concatenate targets
-    # Create test loaders based on the ordered datasets
+    train_permutation = torch.randperm(train_data.size(0))
+    train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
+    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=len(train_data))
+    # Create two test sets - one containing only hard samples, and the other only easy samples
+    hard_and_easy_test_sets = [(hard_test_data, hard_test_target), (easy_test_data, easy_test_target)]
+    full_test_data = torch.cat((hard_and_easy_test_sets[0][0], hard_and_easy_test_sets[1][0]), dim=0)
+    full_test_targets = torch.cat((hard_and_easy_test_sets[0][1], hard_and_easy_test_sets[1][1]), dim=0)
+    # Create 3 test loaders: 1) with all data samples; 2) with only hard data samples; 3) with only easy data samples
     test_loaders = []
-    for data, target in [(full_test_data, full_test_targets)] + datasets:
+    for data, target in [(full_test_data, full_test_targets)] + hard_and_easy_test_sets:
         test_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
         test_loaders.append(test_loader)
     return train_loader, test_loaders
@@ -413,15 +422,30 @@ def test(model: SimpleNN, loader: DataLoader) -> float:
     return round(100 * correct / total, 2)
 
 
-def straggler_ratio_vs_generalisation(reduce_train_ratios: list[float], hard_data: Tensor, hard_target: Tensor,
-                                      easy_data: Tensor, easy_target: Tensor, train_ratio: float,
-                                      reduce_hard: bool, current_accuracies: Dict[str, Dict[float, list]]):
+def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, easy_data: Tensor, easy_target: Tensor,
+                                      train_ratio: float, reduce_hard: bool, remaining_train_ratios: List[float],
+                                      current_accuracies: Dict[str, Dict[float, List]]):
+    """ In this function we want to measure the effect of changing the number of easy/hard samples on the accuracy on
+    the test set for distinct train:test ratio (where train:test ratio is passed as a parameter). The experiments are
+    repeated multiple times to ensure that they are initialization-invariant.
+
+    :param hard_data: identifies hard samples (data)
+    :param hard_target: identified hard samples (target)
+    :param easy_data: identified easy samples (data)
+    :param easy_target: identified easy samples (target)
+    :param train_ratio: percentage of train set to whole dataset
+    :param reduce_hard: flag indicating whether we want to see the effect of changing the number of easy (False) or
+    hard (True) samples
+    :param remaining_train_ratios: list of ratios of easy/hard samples remaining in the train set (0.1 means that 90% of
+    hard samples were removed from the train set before training, when reduce_hard == True)
+    :param current_accuracies: used to save accuracies to the outer scope
+    """
     generalisation_settings = ['full', 'hard', 'easy']
-    for reduce_train_ratio in reduce_train_ratios:
+    for remaining_train_ratio in remaining_train_ratios:
         accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
         train_loader, test_loaders = create_dataloaders_with_straggler_ratio(hard_data, easy_data, hard_target,
                                                                              easy_target, train_ratio,
-                                                                             reduce_train_ratio, reduce_hard)
+                                                                             reduce_hard, remaining_train_ratio)
         # We train multiple times to make sure that the performance is initialization-invariant
         for _ in range(3):
             model, optimizer = initialize_model()
@@ -432,7 +456,7 @@ def straggler_ratio_vs_generalisation(reduce_train_ratios: list[float], hard_dat
                 accuracies_for_ratio[i].append(accuracy)
         # Save the accuracies to the outer scope (outside of this function)
         for i in range(3):
-            current_accuracies[generalisation_settings[i]][reduce_train_ratio].extend(accuracies_for_ratio[i])
+            current_accuracies[generalisation_settings[i]][remaining_train_ratio].extend(accuracies_for_ratio[i])
 
 
 def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], dataset_name: str, save: bool = False):
@@ -460,3 +484,33 @@ def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], datas
     if save:
         plt.savefig(f'Figures/radii_on_{dataset_name}.png')
         plt.savefig(f'Figures/radii_on_{dataset_name}.pdf')
+
+
+def plot_generalisation(train_ratios: list[float], remaining_train_ratios: list[float], reduce_hard: bool,
+                        avg_accuracies: Dict[str, Dict[float, List[float]]], strategy: str, level: str,
+                        std_accuracies: Dict[str, Dict[float, List[float]]], noise_ratio: float, dataset_name: str):
+    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(train_ratios)))
+    for setting in ['full', 'hard', 'easy']:
+        for idx in range(len(train_ratios)):
+            ratio = train_ratios[idx]
+            plt.errorbar(remaining_train_ratios, avg_accuracies[setting][ratio], marker='o', markersize=5,
+                         yerr=std_accuracies[setting][ratio], capsize=5, linewidth=2, color=colors[idx],
+                         label=f'Training:Test={int(100 * ratio)}:{100 - int(100 * ratio)}')
+        plt.xlabel(f'Proportion of {["Easy", "Hard"][reduce_hard]} Samples Remaining in Training Set', fontsize=14)
+        plt.ylabel(f'Accuracy on {setting.capitalize()} Test Set (%)', fontsize=14)
+        plt.xticks(fontsize=12)
+        plt.yticks(fontsize=12)
+        plt.grid(True)
+        plt.legend(title='Training:Test Ratio')
+        plt.tight_layout()
+        # Generate a title for the figure
+        s = ''
+        if strategy != 'stragglers':
+            s = f'{level}_'
+        plt.savefig(
+            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
+            f'{strategy}_{noise_ratio}noise.png')
+        plt.savefig(
+            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
+            f'{strategy}_{noise_ratio}noise.pdf')
+        plt.clf()
