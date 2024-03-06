@@ -24,11 +24,11 @@ def main(dataset_name: str, strategy: str, train_ratios: List[float], remaining_
                                               reduce_hard, remaining_train_ratios, current_accuracies)
         # Compute the average and standard deviation of accuracies for each ratio
         avg_accuracies = {generalisation_settings[i]:
-                              [np.mean(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
-                               for remaining_train_ratio in remaining_train_ratios] for i in range(3)}
+                          [np.mean(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
+                           for remaining_train_ratio in remaining_train_ratios] for i in range(3)}
         std_accuracies = {generalisation_settings[i]:
-                              [np.std(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
-                               for remaining_train_ratio in remaining_train_ratios] for i in range(3)}
+                          [np.std(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
+                           for remaining_train_ratio in remaining_train_ratios] for i in range(3)}
         print(f'For train_ratio = {train_ratio} we get average accuracies of {avg_accuracies["full"]}% on full test set'
               f', {avg_accuracies["hard"]}% on hard test samples and {avg_accuracies["easy"]}% on easy test samples.')
         for setting in generalisation_settings:

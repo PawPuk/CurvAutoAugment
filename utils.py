@@ -146,7 +146,7 @@ def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
         # Do not compute the radii for the first 20 epochs, as those can be unstable. The number 20 was taken from
         # https://github.com/marco-gherardi/stragglers
         if compute_radii and epoch > 20:
-            current_radii = model.radii(loader)
+            current_radii = model.radii(loader, set())
             epoch_radii.append((epoch, current_radii))
     return epoch_radii
 
@@ -162,6 +162,7 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
     the given class
     """
     prev_radii, models = {class_idx: torch.tensor(float('inf')) for class_idx in range(10)}, {}
+    found_classes = set()  # Keep track of classes for which the inversion point has already been found.
     for epoch in range(EPOCHS):
         model.train()
         for data, target in loader:
@@ -174,12 +175,13 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
         # To increase sustainability and reduce complexity we check for the inversion point every 5 epochs.
         if epoch % 5 == 0:
             # Compute radii of class manifolds at this epoch
-            current_radii = model.radii(loader)
+            current_radii = model.radii(loader, found_classes)
             for key in current_radii.keys():
                 # For each class see if the radii didn't increase -> reached inversion point. We only check after epoch
                 # 20 for the same reasons as in train_model()
                 if key not in models.keys() and current_radii[key] > prev_radii[key] and epoch > 20:
                     models[key] = model.to(DEVICE)
+                    found_classes.add(key)
             prev_radii = current_radii
     return models
 
