@@ -19,53 +19,50 @@ CRITERION = torch.nn.CrossEntropyLoss()
 def introduce_label_noise(dataset: Union[Dataset, TensorDataset], noise_rate: float = 0.0) -> List[int]:
     """ Adds noise to the dataset, and returns the list of indices of the so-creates noisy-labels.
 
-    :param dataset: Dataset or TensorDataset object which labels we want to poison
+    :param dataset: Dataset or TensorDataset object whose labels we want to poison
     :param noise_rate: the ratio of the added label noise. After this, the dataset will contain (100*noise_rate)%
     noisy-labels (assuming all labels were correct prior to calling this function)
     :return: list of indices of the added noisy-labels
     """
-    noisy_indices = []  # List to store indices of changed labels
-    # Verify if noise_ratio is in appropriate range
-    if not 1 > noise_rate >= 0:
+    if not 0 <= noise_rate < 1:
         raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
     # Extract targets from the dataset
     if hasattr(dataset, 'targets'):
-        targets = dataset.targets
+        original_targets = dataset.targets.clone()
     elif isinstance(dataset, TensorDataset):
-        targets = dataset.tensors[1]
+        original_targets = dataset.tensors[1].clone()
     else:
         raise TypeError("Dataset provided does not have a recognized structure for applying label noise.")
-    # Ensure targets is a tensor for uniform handling
-    if isinstance(targets, list):
-        targets = torch.tensor(targets)
+
+    total_samples = len(original_targets)
+    num_noisy_labels = int(total_samples * noise_rate)
+    # Randomly select indices to introduce noise
+    all_indices = np.arange(total_samples)
+    noisy_indices = np.random.choice(all_indices, num_noisy_labels, replace=False)
     # Dynamically compute the number of classes in the 'dataset' and their indices
-    unique_classes = targets.unique().tolist()
-    # Apply noise
-    for class_label in unique_classes:
-        class_indices = torch.where(targets == class_label)[0].tolist()
-        num_noisy_labels = int(len(class_indices) * noise_rate)
-        noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
-        for idx in noisy_labels_indices:
-            original_label = targets[idx].item()
-            # Choose a new label different from the original
-            new_label_choices = [c for c in unique_classes if c != original_label]
-            new_label = np.random.choice(new_label_choices)
-            if hasattr(dataset, 'targets'):
-                dataset.targets[idx] = new_label
-            elif isinstance(dataset, TensorDataset):
-                dataset.tensors[1][idx] = new_label
-            noisy_indices.append(idx)
-    return noisy_indices
+    unique_classes = original_targets.unique().tolist()
+    # Apply noise to the selected indices
+    for idx in noisy_indices:
+        original_label = original_targets[idx].item()
+        # Choose a new label different from the original
+        new_label_choices = [c for c in unique_classes if c != original_label]
+        new_label = np.random.choice(new_label_choices)
+        # Update the dataset with the new label
+        if hasattr(dataset, 'targets'):
+            dataset.targets[idx] = torch.tensor(new_label, dtype=original_targets.dtype)
+        elif isinstance(dataset, TensorDataset):
+            dataset.tensors[1][idx] = torch.tensor(new_label, dtype=original_targets.dtype)
+
+    return noisy_indices.tolist()
 
 
-def load_data_and_normalize(dataset_name: str, subset_size: int, noise_rate: float = 0.0) -> TensorDataset:
+def load_data_and_normalize(dataset_name: str, subset_size: int) -> TensorDataset:
     """ Used to load the data from common datasets available in torchvision, and normalize them. The normalization
     is based on the mean and std of a random subset of the dataset of the size subset_size.
 
     :param dataset_name: name of the dataset to load. It has to be available in torchvision.datasets
     :param subset_size: used when not working on the full dataset - the results will be less reliable, but the
     complexity will be lowered
-    :param noise_rate: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
     :return: random, normalized subset of dataset_name of size subset_size with (noise_rate*subset_size) labels changed
     to introduce label noise
     """
@@ -74,9 +71,6 @@ def load_data_and_normalize(dataset_name: str, subset_size: int, noise_rate: flo
                                                     transform=transforms.ToTensor())
     test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True,
                                                    transform=transforms.ToTensor())
-    # Add label noise
-    introduce_label_noise(train_dataset, noise_rate)
-    introduce_label_noise(test_dataset, noise_rate)
     # Concatenate train and test datasets
     full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
     full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
@@ -107,7 +101,7 @@ def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
     """
     loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
     for data, target in loader:
-        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True)
+        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
     return loader
 
 
@@ -297,11 +291,12 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     'energy' allowed
     :param dataset: TensorDataset that contains the data to be divided into easy and hard samples
     :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
-    :param noise_ratio: the ratio of the added label noise; used for confidence- and energy-based methods
+    :param noise_ratio: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
     :return: list containing the identified hard and easy samples
     """
-    # TODO: check how many noisy-labels straggler-based approach identified (so far we assume that the increase in
-    #  straggler count comes from correctly identified noisy-labels, which might not be correct)
+    noisy_indices = []
+    if strategy == 'stragglers':
+        noisy_indices = introduce_label_noise(dataset, noise_ratio)
     loader = transform_datasets_to_dataloaders(dataset)
     model, optimizer = initialize_model()
     # The following are used to store all stragglers and non-stragglers
@@ -314,7 +309,7 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     # Check if stragglers for all classes were found. If not repeat the search
     if set(models.keys()) != set(range(10)):
         print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(strategy, dataset, level, noise_ratio)
+        return identify_hard_samples(strategy, dataset, level, 0.0)
     # The following is used to know the distribution of stragglers between classes
     stragglers = [torch.tensor(False) for _ in range(10)]
     # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
@@ -329,19 +324,25 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
             hard_target = torch.cat((hard_target, target[stragglers[class_idx]]), dim=0)
             easy_data = torch.cat((easy_data, data[current_non_stragglers]), dim=0)
             easy_target = torch.cat((easy_target, target[current_non_stragglers]), dim=0)
+    if len(noisy_indices) > 0:
+        combined_stragglers = torch.any(torch.stack(stragglers), dim=0)
+        straggler_indices = set(torch.where(combined_stragglers)[0].cpu().tolist())
+        accuracy = len(straggler_indices.intersection(noisy_indices)) / len(noisy_indices) * 100
+        print(print(f'Correctly guessed {accuracy:.2f}% of label noise '
+              f'({len(set(straggler_indices).intersection(noisy_indices))} out of {len(noisy_indices)}).'))
     # Compute the class-level number of stragglers
     stragglers = [int(tensor.sum().item()) for tensor in stragglers]
     print(f'Found {sum(stragglers)} stragglers.')
     if strategy in ["confidence", "energy"]:
         # Introduce noise and increase the threshold for confidence- and energy-based methods
-        indices = introduce_label_noise(dataset, noise_ratio)
-        print(f'Poisoned {len(indices)} labels.')
+        noisy_indices = introduce_label_noise(dataset, noise_ratio)
+        print(f'Poisoned {len(noisy_indices)} labels.')
         for class_idx in range(len(stragglers)):
             stragglers[class_idx] = stragglers[class_idx] + int(noise_ratio * len(dataset) / len(stragglers))
         print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
         # Identify hard an easy samples using confidence- or energy-based method
         hard_data, hard_target, easy_data, easy_target = (
-            identify_hard_samples_with_model_accuracy(indices, dataset, stragglers, strategy, level))
+            identify_hard_samples_with_model_accuracy(noisy_indices, dataset, stragglers, strategy, level))
     return [hard_data, hard_target, easy_data, easy_target]
 
 

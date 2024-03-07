@@ -9,7 +9,7 @@ from utils import load_data_and_normalize, identify_hard_samples, plot_generalis
 
 def main(dataset_name: str, strategy: str, train_ratios: List[float], remaining_train_ratios: List[float],
          reduce_hard: bool, level: str, noise_ratio: float, subset_size: int):
-    dataset = load_data_and_normalize(dataset_name, subset_size, [0.0, noise_ratio][strategy == 'stragglers'])
+    dataset = load_data_and_normalize(dataset_name, subset_size)
     generalisation_settings = ['full', 'hard', 'easy']
     total_avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in generalisation_settings}
     total_std_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in generalisation_settings}
