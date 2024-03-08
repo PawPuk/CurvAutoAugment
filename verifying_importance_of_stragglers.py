@@ -16,7 +16,7 @@ def main(dataset_name: str, strategy: str, train_ratios: List[float], remaining_
     for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
         current_accuracies = {setting: {reduce_train_ratio: [] for reduce_train_ratio in remaining_train_ratios}
                               for setting in generalisation_settings}
-        for _ in tqdm.tqdm(range(1), desc='Repeating the experiment for different straggler sets'):
+        for _ in tqdm.tqdm(range(2), desc='Repeating the experiment for different straggler sets'):
             hard_data, hard_target, easy_data, easy_target = identify_hard_samples(strategy, dataset, level,
                                                                                    noise_ratio)
             print(f'A total of {len(hard_data)} hard samples and {len(easy_data)} easy samples were found.')
@@ -57,7 +57,8 @@ if __name__ == "__main__":
                         help='flag indicating whether we want to see the effect of changing the number of easy (False) '
                              'or hard (True) samples.')
     parser.add_argument('--level', type=str, choices=['class', 'dataset'], default='dataset',
-                        help='Specifies the level at which confidence and energy are computed.')
+                        help='Specifies the level at which the energy is computed. Is also affects how the hard samples'
+                             ' are chosen in confidence- and energy-based methods')
     parser.add_argument('--noise_ratio', type=float, default=0.0,
                         help='The ratio of the added label noise. After this, the dataset will contain (100*noise_ratio'
                              ')% noisy-labels (assuming all labels were correct prior to calling this function).')

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.optim import SGD
-from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
 from neural_networks import SimpleNN
@@ -210,9 +210,11 @@ def select_stragglers_class_level(results: List[Tuple[int, float]], stragglers_p
     """
     targets = [label for _, label in dataset]
     class_results = {i: [] for i in range(10)}
-    for idx, score, correct in results:
+    # Sort the results based on the prediction class
+    for idx, score in results:
         class_label = targets[idx]  # Use the passed targets list/tensor
-        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score, correct))
+        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score))
+    # Extract most uncertain samples on a class-level
     stragglers_indices = []
     for class_label, class_result in class_results.items():
         class_result.sort(key=lambda x: x[1], reverse=(strategy == 'energy'))
@@ -221,8 +223,17 @@ def select_stragglers_class_level(results: List[Tuple[int, float]], stragglers_p
     return stragglers_indices
 
 
-def calculate_energy(logits: Tensor, temperature: float = 1.0) -> Tensor:
-    # Calculate the energy score based on logits
+def calculate_energy(logits: Tensor, targets: Tensor, level: str, temperature: float = 1.0) -> Tensor:
+    if level == 'class':
+        # Compute energy for each class individually
+        unique_classes = targets.unique()
+        class_energies = torch.empty(size=(len(logits),), dtype=logits.dtype, device=logits.device)
+        for class_label in unique_classes:
+            class_mask = (targets == class_label)
+            class_logits = logits[class_mask]
+            # Calculate class-specific energy
+            class_energies[class_mask] = -temperature * torch.logsumexp(class_logits / temperature, dim=1)
+        return class_energies
     return -temperature * torch.logsumexp(logits / temperature, dim=1)
 
 
@@ -236,14 +247,10 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
     for confidence- and energy-based methods)
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
-    :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
+    :param level: specifies the level at which the energy is computed; it also affects how the hard samples are chose
+    (is it class- or dataset-level); only 'dataset' and 'class' allowed
     :return: tuple containing the identified hard and easy samples
     """
-    # TODO: Add Cross-Validation. Make computation of energy and confidence truly class-level (when strategy == 'class')
-    if strategy not in ["confidence", "energy"]:
-        raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {strategy} is not allowed.")
-    if level not in ['dataset', 'class']:
-        raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
     # Initialize necessary variables and models before training
     hard_data, hard_target, easy_data, easy_target, results, total_hard_indices = [], [], [], [], [], []
     model, optimizer = initialize_model()
@@ -258,7 +265,7 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
             data, target = data.to(DEVICE), target.to(DEVICE)
             output = model(data)
             if strategy == 'energy':
-                energy = calculate_energy(output).cpu().numpy()
+                energy = calculate_energy(output, target, level).cpu().numpy()
                 results.extend(list(zip(range(len(dataset)), energy,)))
             else:
                 confidence = output.max(1)[0].cpu().numpy()
@@ -290,7 +297,8 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
     :param dataset: TensorDataset that contains the data to be divided into easy and hard samples
-    :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
+    :param level: specifies the level at which the energy is computed and how the hard samples are chosen; only
+    'dataset' and 'class' allowed
     :param noise_ratio: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
     :return: list containing the identified hard and easy samples
     """
