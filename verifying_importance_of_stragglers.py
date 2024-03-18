@@ -7,8 +7,9 @@ import tqdm
 from utils import load_data_and_normalize, identify_hard_samples, plot_generalisation, straggler_ratio_vs_generalisation
 
 
-def main(dataset_name: str, strategy: str, train_ratios: List[float], remaining_train_ratios: List[float],
-         reduce_hard: bool, level: str, noise_ratio: float, subset_size: int):
+def main(dataset_name: str, strategy: str, straggler_sets: int, train_ratios: List[float],
+         remaining_train_ratios: List[float], reduce_hard: bool, level: str, noise_ratio: float, subset_size: int,
+         evaluation_network: str):
     dataset = load_data_and_normalize(dataset_name, subset_size)
     generalisation_settings = ['full', 'hard', 'easy']
     total_avg_accuracies = {setting: {ratio: [] for ratio in train_ratios} for setting in generalisation_settings}
@@ -16,12 +17,12 @@ def main(dataset_name: str, strategy: str, train_ratios: List[float], remaining_
     for idx, train_ratio in tqdm.tqdm(enumerate(train_ratios), desc='Going through different train:test ratios'):
         current_accuracies = {setting: {reduce_train_ratio: [] for reduce_train_ratio in remaining_train_ratios}
                               for setting in generalisation_settings}
-        for _ in tqdm.tqdm(range(2), desc='Repeating the experiment for different straggler sets'):
+        for _ in tqdm.tqdm(range(straggler_sets), desc='Repeating the experiment for different straggler sets'):
             hard_data, hard_target, easy_data, easy_target = identify_hard_samples(strategy, dataset, level,
                                                                                    noise_ratio)
             print(f'A total of {len(hard_data)} hard samples and {len(easy_data)} easy samples were found.')
-            straggler_ratio_vs_generalisation(hard_data, hard_target, easy_data, easy_target, train_ratio,
-                                              reduce_hard, remaining_train_ratios, current_accuracies)
+            straggler_ratio_vs_generalisation(hard_data, hard_target, easy_data, easy_target, train_ratio, reduce_hard,
+                                              remaining_train_ratios, current_accuracies, evaluation_network)
         # Compute the average and standard deviation of accuracies for each ratio
         avg_accuracies = {generalisation_settings[i]:
                           [np.mean(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
@@ -46,6 +47,9 @@ if __name__ == "__main__":
                         help='Dataset name. The code was tested on MNIST, FashionMNIST and KMNIST.')
     parser.add_argument('--strategy', type=str, choices=['stragglers', 'confidence', 'energy'],
                         default='stragglers', help='Strategy (method) to use for identifying hard samples.')
+    parser.add_argument('--straggler_sets', type=int, default=3,
+                        help='Specifies how many straggler sets will be computed for the experiment. The larger this '
+                             'value the higher the complexity and the higher the statistical significance.')
     parser.add_argument('--train_ratios', nargs='+', type=float, default=[0.9, 0.5],
                         help='Percentage of train set to whole dataset - used to infer training:test ratio.')
     parser.add_argument('--remaining_train_ratios', nargs='+', type=float,
@@ -62,7 +66,11 @@ if __name__ == "__main__":
     parser.add_argument('--noise_ratio', type=float, default=0.0,
                         help='The ratio of the added label noise. After this, the dataset will contain (100*noise_ratio'
                              ')% noisy-labels (assuming all labels were correct prior to calling this function).')
-    parser.add_argument('--subset_size', type=int)
-
+    parser.add_argument('--subset_size', default=20000, type=int,
+                        help='Specifies the subset of the dataset used for the experiments. Later it will be divided '
+                             'into train and testing training and test sets based pm the --train_ratios parameter.')
+    parser.add_argument('--evaluation_network', default='SimpleNN', choices=['SimpleNN', 'ResNet'],
+                        help='Specifies the network that will be used for evaluating the performance on hard and easy '
+                             'data. This shows that no matter the network used, the hard samples remain hard to learn')
     args = parser.parse_args()
     main(**vars(args))

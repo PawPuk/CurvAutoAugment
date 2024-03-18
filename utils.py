@@ -4,11 +4,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import Tensor
-from torch.optim import SGD
+from torch.optim import Adam, SGD
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
-from neural_networks import SimpleNN
+from neural_networks import BasicBlock, SimpleNN, ResNet
 
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,18 +105,24 @@ def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
     return loader
 
 
-def initialize_model() -> Tuple[SimpleNN, SGD]:
+def initialize_model(latent: int = 1, evaluation_network: str = 'SimpleNN') -> Tuple[SimpleNN, SGD]:
     """ Used to initialize the model and optimizer.
 
+    :param latent: the index of the hidden layer used to extract the latent representation for radii computations
+    :param evaluation_network: specifies the type of network to initialize
     :return: initialized SimpleNN model and SGD optimizer
     """
-    model = SimpleNN(28 * 28, 2, 20, 1)
-    optimizer = SGD(model.parameters(), lr=0.1)
+    if evaluation_network == 'SimpleNN':
+        model = SimpleNN(28 * 28, 2, 20, latent)
+        optimizer = SGD(model.parameters(), lr=0.1)
+    else:
+        model = ResNet(img_channels=1, num_layers=18, block=BasicBlock, num_classes=10)
+        optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-2)
     model.to(DEVICE)
     return model, optimizer
 
 
-def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
+def train_model(model: Union[SimpleNN, ResNet], loader: DataLoader, optimizer: Union[SGD, Adam],
                 compute_radii: bool = True) -> List[Tuple[int, Dict[int, torch.Tensor]]]:
     """
 
@@ -145,7 +151,8 @@ def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
     return epoch_radii
 
 
-def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD) -> Dict[int, Union[SimpleNN, None]]:
+def train_stop_at_inversion(model: SimpleNN, loader: DataLoader,
+                            optimizer: SGD) -> Tuple[Dict[int, SimpleNN], Dict[int, int]]:
     """ Train a model and monitor the radii of class manifolds. When an inversion point is identified for a class, save
     the current state of the model to the 'model' list that is returned by this function.
 
@@ -157,6 +164,7 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
     """
     prev_radii, models = {class_idx: torch.tensor(float('inf')) for class_idx in range(10)}, {}
     found_classes = set()  # Keep track of classes for which the inversion point has already been found.
+    inversion_points = {}
     for epoch in range(EPOCHS):
         model.train()
         for data, target in loader:
@@ -176,8 +184,13 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
                 if key not in models.keys() and current_radii[key] > prev_radii[key] and epoch > 20:
                     models[key] = model.to(DEVICE)
                     found_classes.add(key)
+                    inversion_points[key] = epoch
             prev_radii = current_radii
-    return models
+        if set(models.keys()) == set(range(10)):
+            break
+    print(inversion_points)
+    print(models.keys())
+    return models, inversion_points
 
 
 def select_stragglers_dataset_level(results: List[Tuple[int, float]], num_stragglers: int,
@@ -266,7 +279,7 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
             output = model(data)
             if strategy == 'energy':
                 energy = calculate_energy(output, target, level).cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), energy,)))
+                results.extend(list(zip(range(len(dataset)), energy)))
             else:
                 confidence = output.max(1)[0].cpu().numpy()
                 results.extend(list(zip(range(len(dataset)), confidence)))
@@ -313,12 +326,12 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     easy_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     easy_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     # Look for inversion point for each class manifold
-    models = train_stop_at_inversion(model, loader, optimizer)
+    models, _ = train_stop_at_inversion(model, loader, optimizer)
     # Check if stragglers for all classes were found. If not repeat the search
     if set(models.keys()) != set(range(10)):
         print('Have to restart because not all stragglers were found.')
         return identify_hard_samples(strategy, dataset, level, 0.0)
-    # The following is used to know the distribution of stragglers between classes
+    # This is used to know the distribution of stragglers between classes
     stragglers = [torch.tensor(False) for _ in range(10)]
     # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
     for data, target in loader:
@@ -435,7 +448,7 @@ def test(model: SimpleNN, loader: DataLoader) -> float:
 
 def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, easy_data: Tensor, easy_target: Tensor,
                                       train_ratio: float, reduce_hard: bool, remaining_train_ratios: List[float],
-                                      current_accuracies: Dict[str, Dict[float, List]]):
+                                      current_accuracies: Dict[str, Dict[float, List]], evaluation_network: str):
     """ In this function we want to measure the effect of changing the number of easy/hard samples on the accuracy on
     the test set for distinct train:test ratio (where train:test ratio is passed as a parameter). The experiments are
     repeated multiple times to ensure that they are initialization-invariant.
@@ -450,6 +463,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
     :param remaining_train_ratios: list of ratios of easy/hard samples remaining in the train set (0.1 means that 90% of
     hard samples were removed from the train set before training, when reduce_hard == True)
     :param current_accuracies: used to save accuracies to the outer scope
+    :param evaluation_network: this network will be used to measure the performance on hard/easy data
     """
     generalisation_settings = ['full', 'hard', 'easy']
     for remaining_train_ratio in remaining_train_ratios:
@@ -459,7 +473,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
                                                                              reduce_hard, remaining_train_ratio)
         # We train multiple times to make sure that the performance is initialization-invariant
         for _ in range(3):
-            model, optimizer = initialize_model()
+            model, optimizer = initialize_model(evaluation_network=evaluation_network)
             train_model(model, train_loader, optimizer, False)
             # Evaluate the model on test set
             for i in range(3):
@@ -483,7 +497,7 @@ def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], datas
     for run_index in range(len(all_radii)):
         radii = all_radii[run_index]
         for i, ax in enumerate(axes.flatten()):
-            y = [radii[j][1][i] for j in range(len(radii))]
+            y = [radii[j][1][i].cpu() for j in range(len(radii))]
             x = [radii[j][0] for j in range(len(radii))]
             ax.plot(x, y, color=colors[run_index], linewidth=3)
             if run_index == 0:
