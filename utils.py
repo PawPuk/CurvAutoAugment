@@ -56,6 +56,18 @@ def introduce_label_noise(dataset: Union[Dataset, TensorDataset], noise_rate: fl
     return noisy_indices.tolist()
 
 
+def adjust_channels(data):
+    """Adjust data channels to ensure compatibility across different datasets."""
+    if isinstance(data, np.ndarray):  # Convert NumPy arrays to PyTorch tensors if necessary
+        data = torch.tensor(data, dtype=torch.float)  # Ensure conversion to float dtype
+    if data.ndim == 3:  # For grayscale images (e.g., MNIST), add a channel dimension
+        return data.float().unsqueeze(1)
+    elif data.ndim == 4 and data.shape[-1] in (1, 3):  # For RGB or grayscale images in HWC format
+        return data.permute(0, 3, 1, 2)  # Permute dimensions from HWC to CHW format
+    else:
+        raise ValueError("Unsupported data dimensionality.")
+
+
 def load_data_and_normalize(dataset_name: str, subset_size: int) -> TensorDataset:
     """ Used to load the data from common datasets available in torchvision, and normalize them. The normalization
     is based on the mean and std of a random subset of the dataset of the size subset_size.
@@ -71,9 +83,23 @@ def load_data_and_normalize(dataset_name: str, subset_size: int) -> TensorDatase
                                                     transform=transforms.ToTensor())
     test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True,
                                                    transform=transforms.ToTensor())
+    # Adjust the datasets based on their channel format
+    train_data = adjust_channels(train_dataset.data)
+    test_data = adjust_channels(test_dataset.data)
+
+    # Check if targets are a list and convert to tensor if necessary
+    if isinstance(train_dataset.targets, list):
+        train_targets = torch.tensor(train_dataset.targets)
+    else:
+        train_targets = train_dataset.targets
+
+    if isinstance(test_dataset.targets, list):
+        test_targets = torch.tensor(test_dataset.targets)
+    else:
+        test_targets = test_dataset.targets
     # Concatenate train and test datasets
-    full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
-    full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
+    full_data = torch.cat([train_data, test_data])
+    full_targets = torch.cat([train_targets, test_targets])
     # Shuffle the combined dataset
     shuffled_indices = torch.randperm(len(full_data))
     full_data, full_targets = full_data[shuffled_indices], full_targets[shuffled_indices]
@@ -105,18 +131,26 @@ def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
     return loader
 
 
-def initialize_model(latent: int = 1, evaluation_network: str = 'SimpleNN') -> Tuple[SimpleNN, SGD]:
+def initialize_model(latent: int = 1, evaluation_network: str = 'SimpleNN',
+                     dataset: str = 'MNIST') -> Tuple[SimpleNN, SGD]:
     """ Used to initialize the model and optimizer.
 
     :param latent: the index of the hidden layer used to extract the latent representation for radii computations
     :param evaluation_network: specifies the type of network to initialize
+    :param dataset: specifies which dataset will the model be trained on (needed to set input & output layer)
     :return: initialized SimpleNN model and SGD optimizer
     """
     if evaluation_network == 'SimpleNN':
-        model = SimpleNN(28 * 28, 2, 20, latent)
+        if dataset in ['MNIST', 'FashionMNIST', 'KMNIST']:
+            model = SimpleNN(28 * 28, 2, 20, latent)
+        else:
+            model = SimpleNN(3*32*32, 8, 30, latent)
         optimizer = SGD(model.parameters(), lr=0.1)
     else:
-        model = ResNet(img_channels=1, num_layers=18, block=BasicBlock, num_classes=10)
+        if dataset in ['MNIST', 'FashionMNIST', 'KMNIST']:
+            model = ResNet(img_channels=1, num_layers=18, block=BasicBlock, num_classes=10)
+        else:
+            model = ResNet(img_channels=3, num_layers=18, block=BasicBlock, num_classes=10)
         optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-2)
     model.to(DEVICE)
     return model, optimizer
@@ -251,7 +285,7 @@ def calculate_energy(logits: Tensor, targets: Tensor, level: str, temperature: f
 
 
 def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: TensorDataset, stragglers: List[int],
-                                              strategy: str, level: str) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+                                              strategy: str, level: str, dataset_name: str) -> List[Tensor]:
     """ This function divides the 'dataset' into hard and easy samples using either confidence- or energy-based method.
 
     :param gt_indices: list of noisy-label indices (gt stands for ground truth)
@@ -262,11 +296,12 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
     'energy' allowed
     :param level: specifies the level at which the energy is computed; it also affects how the hard samples are chose
     (is it class- or dataset-level); only 'dataset' and 'class' allowed
+    :param dataset_name: specifies which dataset will the model be trained on (needed to set input & output layer)
     :return: tuple containing the identified hard and easy samples
     """
     # Initialize necessary variables and models before training
     hard_data, hard_target, easy_data, easy_target, results, total_hard_indices = [], [], [], [], [], []
-    model, optimizer = initialize_model()
+    model, optimizer = initialize_model(dataset=dataset_name)
     loader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset), shuffle=False)
     for data, target in loader:  # This is done to increase the speed (works due to full-batch setting)
         loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
@@ -301,10 +336,11 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
         accuracy = len(set(total_hard_indices).intersection(gt_indices)) / len(gt_indices) * 100
         print(f'Correctly guessed {accuracy}% of label noise '
               f'({len(set(total_hard_indices).intersection(gt_indices))} out of {len(gt_indices)}).')
-    return torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target)
+    return [torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target)]
 
 
-def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noise_ratio: float) -> List[Tensor]:
+def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noise_ratio: float,
+                          dataset_name: str) -> List[Tensor]:
     """ This function divides 'loader' (or 'dataset', depending on the used 'strategy') into hard and easy samples.
 
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
@@ -313,13 +349,14 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     :param level: specifies the level at which the energy is computed and how the hard samples are chosen; only
     'dataset' and 'class' allowed
     :param noise_ratio: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
+    :param dataset_name: specifies which dataset will the model be trained on (needed to set input & output layer)
     :return: list containing the identified hard and easy samples
     """
     noisy_indices = []
     if strategy == 'stragglers':
         noisy_indices = introduce_label_noise(dataset, noise_ratio)
     loader = transform_datasets_to_dataloaders(dataset)
-    model, optimizer = initialize_model()
+    model, optimizer = initialize_model(dataset=dataset_name)
     # The following are used to store all stragglers and non-stragglers
     hard_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     hard_target = torch.tensor([], dtype=torch.long).to(DEVICE)
@@ -330,7 +367,7 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     # Check if stragglers for all classes were found. If not repeat the search
     if set(models.keys()) != set(range(10)):
         print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(strategy, dataset, level, 0.0)
+        return identify_hard_samples(strategy, dataset, level, 0.0, dataset_name)
     # This is used to know the distribution of stragglers between classes
     stragglers = [torch.tensor(False) for _ in range(10)]
     # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
@@ -363,7 +400,8 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
         print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
         # Identify hard an easy samples using confidence- or energy-based method
         hard_data, hard_target, easy_data, easy_target = (
-            identify_hard_samples_with_model_accuracy(noisy_indices, dataset, stragglers, strategy, level))
+            identify_hard_samples_with_model_accuracy(noisy_indices, dataset, stragglers, strategy, level, dataset_name)
+        )
     return [hard_data, hard_target, easy_data, easy_target]
 
 
@@ -414,7 +452,7 @@ def create_dataloaders_with_straggler_ratio(hard_data: Tensor, easy_data: Tensor
     # Shuffle the final train dataset
     train_permutation = torch.randperm(train_data.size(0))
     train_data, train_targets = train_data[train_permutation], train_targets[train_permutation]
-    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=len(train_data))
+    train_loader = DataLoader(TensorDataset(train_data, train_targets), batch_size=64)
     # Create two test sets - one containing only hard samples, and the other only easy samples
     hard_and_easy_test_sets = [(hard_test_data, hard_test_target), (easy_test_data, easy_test_target)]
     full_test_data = torch.cat((hard_and_easy_test_sets[0][0], hard_and_easy_test_sets[1][0]), dim=0)
@@ -422,7 +460,7 @@ def create_dataloaders_with_straggler_ratio(hard_data: Tensor, easy_data: Tensor
     # Create 3 test loaders: 1) with all data samples; 2) with only hard data samples; 3) with only easy data samples
     test_loaders = []
     for data, target in [(full_test_data, full_test_targets)] + hard_and_easy_test_sets:
-        test_loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
+        test_loader = DataLoader(TensorDataset(data, target), batch_size=64, shuffle=False)
         test_loaders.append(test_loader)
     return train_loader, test_loaders
 
@@ -448,7 +486,8 @@ def test(model: SimpleNN, loader: DataLoader) -> float:
 
 def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, easy_data: Tensor, easy_target: Tensor,
                                       train_ratio: float, reduce_hard: bool, remaining_train_ratios: List[float],
-                                      current_accuracies: Dict[str, Dict[float, List]], evaluation_network: str):
+                                      current_accuracies: Dict[str, Dict[float, List]], evaluation_network: str,
+                                      dataset_name: str):
     """ In this function we want to measure the effect of changing the number of easy/hard samples on the accuracy on
     the test set for distinct train:test ratio (where train:test ratio is passed as a parameter). The experiments are
     repeated multiple times to ensure that they are initialization-invariant.
@@ -464,6 +503,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
     hard samples were removed from the train set before training, when reduce_hard == True)
     :param current_accuracies: used to save accuracies to the outer scope
     :param evaluation_network: this network will be used to measure the performance on hard/easy data
+    :param dataset_name: specifies which dataset will the model be trained on (needed to set input & output layer)
     """
     generalisation_settings = ['full', 'hard', 'easy']
     for remaining_train_ratio in remaining_train_ratios:
@@ -473,7 +513,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
                                                                              reduce_hard, remaining_train_ratio)
         # We train multiple times to make sure that the performance is initialization-invariant
         for _ in range(3):
-            model, optimizer = initialize_model(evaluation_network=evaluation_network)
+            model, optimizer = initialize_model(evaluation_network=evaluation_network, dataset=dataset_name)
             train_model(model, train_loader, optimizer, False)
             # Evaluate the model on test set
             for i in range(3):

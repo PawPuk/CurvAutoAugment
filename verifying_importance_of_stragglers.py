@@ -19,10 +19,11 @@ def main(dataset_name: str, strategy: str, straggler_sets: int, train_ratios: Li
                               for setting in generalisation_settings}
         for _ in tqdm.tqdm(range(straggler_sets), desc='Repeating the experiment for different straggler sets'):
             hard_data, hard_target, easy_data, easy_target = identify_hard_samples(strategy, dataset, level,
-                                                                                   noise_ratio)
+                                                                                   noise_ratio, dataset_name)
             print(f'A total of {len(hard_data)} hard samples and {len(easy_data)} easy samples were found.')
             straggler_ratio_vs_generalisation(hard_data, hard_target, easy_data, easy_target, train_ratio, reduce_hard,
-                                              remaining_train_ratios, current_accuracies, evaluation_network)
+                                              remaining_train_ratios, current_accuracies, evaluation_network,
+                                              dataset_name)
         # Compute the average and standard deviation of accuracies for each ratio
         avg_accuracies = {generalisation_settings[i]:
                           [np.mean(current_accuracies[generalisation_settings[i]][remaining_train_ratio])
