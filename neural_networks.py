@@ -41,13 +41,14 @@ class MyNN(torch.nn.Module):
 
 
 class SimpleNN(MyNN):
-    def __init__(self, in_size: int, depth: int, width_hid: int, latent: int):
+    def __init__(self, in_size: int, depth: int, width_hid: int, latent: int, out_size: int = 10):
         """
 
         :param in_size: size of input
         :param depth: number of hidden layers
         :param width_hid: width of hidden layers
         :param latent: ordinal number of hidden layer where the observables are computed
+        :param out_size: size of output - number of classes
         """
         super().__init__()
         if not 0 < latent <= depth + 1:
@@ -57,7 +58,7 @@ class SimpleNN(MyNN):
         self.layers = torch.nn.ModuleList([torch.nn.Linear(in_size, width_hid, bias=True)])
         for _ in range(depth - 1):
             self.layers.append(torch.nn.Linear(width_hid, width_hid, bias=True))
-        self.layers.append(torch.nn.Linear(width_hid, 10, bias=True))
+        self.layers.append(torch.nn.Linear(width_hid, out_size, bias=True))
 
     def latent_representation(self, x: Tensor) -> Tensor:
         x = x.view(-1, self.layers[0].in_features)
@@ -165,7 +166,7 @@ class ResNet(nn.Module):
         x = self.bn1(x)
         x = self.relu(x)
         # Assuming the latent representation is the output after layer1.
-        x = self.layer1(x)
+        # x = self.layer1(x)
         return x
 
     def radii(self, data_loader: torch.utils.data.DataLoader, sustainability_mask: Set[int]) -> Dict[int, torch.Tensor]:
