@@ -22,7 +22,7 @@ def main(dataset_name: str, subset_size: int, network: str):
         model.to(device)
         epoch_radii = train_model(model, loader, optimizer)
         all_epoch_radii.append(epoch_radii)
-    with open(f'Results/all_epoch_radii_{subset_size}{dataset_name}.pkl', 'wb') as f:
+    with open(f'Results/Radii_over_epoch/all_epoch_radii_{subset_size}{dataset_name}.pkl', 'wb') as f:
         pickle.dump(all_epoch_radii, f)
     plot_radii(all_epoch_radii, 'MNIST', True)
 

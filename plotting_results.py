@@ -65,37 +65,40 @@ def plot_combined_metrics(file_path, figs, axs, idx_offset):
         axs[idx].set_ylabel(metric_name.capitalize())
         axs[idx].set_xticks(ratios_float)
         axs[idx].grid(True)
-        custom_lines = [
-            plt.Line2D([0], [0], color='black', linestyle='solid', lw=2),
-            plt.Line2D([0], [0], color='black', linestyle='dotted', lw=2),
-            plt.Line2D([0], [0], color='blue', marker='o', lw=0, markersize=10),
-            plt.Line2D([0], [0], color='green', marker='s', lw=0, markersize=10),
-            plt.Line2D([0], [0], color='red', marker='x', lw=0, markersize=10)
-        ]
-
-        # Create a legend with a title and custom lines
-        axs[idx].legend(custom_lines, [
-            'Accuracy on: Hard samples', 'Easy samples',
-            'Identifying Hard Samples with: Energy-based',
-            'Confidence-based', 'Straggler-based'
-        ], title="Legend", loc='upper left', bbox_to_anchor=(1,1))
 
 
+easy = False
 # Prepare figures and axes for each metric
 figs, axs = [], []
 metrics_names = ['accuracy', 'precision', 'recall', 'f1']
 for i in range(4):  # 4 metrics
-    fig, ax = plt.subplots(figsize=(15, 8))
+    fig, ax = plt.subplots(figsize=(11, 7))
     figs.append(fig)
     axs.append(ax)
-easy = False
+    custom_lines = [
+        plt.Line2D([0], [0], color='black', linestyle='solid', lw=2, label='Hard samples'),
+        plt.Line2D([0], [0], color='black', linestyle='dotted', lw=2, label='Easy samples')
+    ]
+    line_marker_legend = plt.legend(handles=custom_lines, title='Accuracy on:', loc='center left',
+                                    bbox_to_anchor=(0.7, 0.8))
+    plt.gca().add_artist(line_marker_legend)
+    method_legend_labels = [
+        plt.Line2D([0], [0], color='blue', marker='o', lw=0, markersize=10, label='Energy-based'),
+        plt.Line2D([0], [0], color='green', marker='s', lw=0, markersize=10, label='Confidence-based'),
+        plt.Line2D([0], [0], color='red', marker='x', lw=0, markersize=10, label='Straggler-based')
+    ]
+    plt.legend(handles=method_legend_labels, title='Identifying Hard Samples with:', loc='lower center',
+               bbox_to_anchor=(0.8, 0.53))
+
 files = glob.glob(f'Results/F1_results/MNIST_*_{["True", "False"][easy]}_20000_metrics.pkl')
 
 # Iterate over files and plot metrics on each figure
 for file_path in files:
     plot_combined_metrics(file_path, figs, axs, 0)  # idx_offset is not used here, can be removed
-names = [f'{["hard", "easy"][easy]}_accuracy.pdf', f'{["hard", "easy"][easy]}_precision.pdf',
-         f'{["hard", "easy"][easy]}_recall.pdf', f'{["hard", "easy"][easy]}_F1.pdf']
+names = [f'Figures/Figure 7/{["e) hard", "a) easy"][easy]}_accuracy.pdf',
+         f'Figures/Figure 7/{["f) hard", "b) easy"][easy]}_recall.pdf',
+         f'Figures/Figure 7/{["g) hard", "c) easy"][easy]}_precision.pdf',
+         f'Figures/Figure 7/{["h) hard", "d) easy"][easy]}_F1.pdf']
 for i, fig in enumerate(figs):
     fig.savefig(names[i])
 plt.show()
