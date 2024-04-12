@@ -4,68 +4,70 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import Tensor
-from torch.optim import SGD
-from torch.utils.data import ConcatDataset, Dataset, DataLoader, TensorDataset
+from torch.optim import Adam, SGD
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+from torchmetrics import Accuracy, Precision, Recall, F1Score
 from torchvision import datasets, transforms
 
-from neural_networks import SimpleNN
+from neural_networks import BasicBlock, SimpleNN, ResNet
 
 EPSILON = 0.000000001  # cutoff for the computation of the variance in the standardisation
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPOCHS = 500
 CRITERION = torch.nn.CrossEntropyLoss()
+np.random.seed(42)
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
 
 
 def introduce_label_noise(dataset: Union[Dataset, TensorDataset], noise_rate: float = 0.0) -> List[int]:
     """ Adds noise to the dataset, and returns the list of indices of the so-creates noisy-labels.
 
-    :param dataset: Dataset or TensorDataset object which labels we want to poison
+    :param dataset: Dataset or TensorDataset object whose labels we want to poison
     :param noise_rate: the ratio of the added label noise. After this, the dataset will contain (100*noise_rate)%
     noisy-labels (assuming all labels were correct prior to calling this function)
     :return: list of indices of the added noisy-labels
     """
-    noisy_indices = []  # List to store indices of changed labels
-    # Verify if noise_ratio is in appropriate range
-    if not 1 > noise_rate >= 0:
+    if not 0 <= noise_rate < 1:
         raise ValueError(f'The parameter noise_rate has to be in [0, 1). Value {noise_rate} not allowed.')
     # Extract targets from the dataset
     if hasattr(dataset, 'targets'):
-        targets = dataset.targets
+        original_targets = dataset.targets.clone()
     elif isinstance(dataset, TensorDataset):
-        targets = dataset.tensors[1]
+        original_targets = dataset.tensors[1].clone()
     else:
         raise TypeError("Dataset provided does not have a recognized structure for applying label noise.")
-    # Ensure targets is a tensor for uniform handling
-    if isinstance(targets, list):
-        targets = torch.tensor(targets)
+
+    total_samples = len(original_targets)
+    num_noisy_labels = int(total_samples * noise_rate)
+    # Randomly select indices to introduce noise
+    all_indices = np.arange(total_samples)
+    noisy_indices = np.random.choice(all_indices, num_noisy_labels, replace=False)
     # Dynamically compute the number of classes in the 'dataset' and their indices
-    unique_classes = targets.unique().tolist()
-    # Apply noise
-    for class_label in unique_classes:
-        class_indices = torch.where(targets == class_label)[0].tolist()
-        num_noisy_labels = int(len(class_indices) * noise_rate)
-        noisy_labels_indices = np.random.choice(class_indices, num_noisy_labels, replace=False)
-        for idx in noisy_labels_indices:
-            original_label = targets[idx].item()
-            # Choose a new label different from the original
-            new_label_choices = [c for c in unique_classes if c != original_label]
-            new_label = np.random.choice(new_label_choices)
-            if hasattr(dataset, 'targets'):
-                dataset.targets[idx] = new_label
-            elif isinstance(dataset, TensorDataset):
-                dataset.tensors[1][idx] = new_label
-            noisy_indices.append(idx)
-    return noisy_indices
+    unique_classes = original_targets.unique().tolist()
+    # Apply noise to the selected indices
+    for idx in noisy_indices:
+        original_label = original_targets[idx].item()
+        # Choose a new label different from the original
+        new_label_choices = [c for c in unique_classes if c != original_label]
+        new_label = np.random.choice(new_label_choices)
+        # Update the dataset with the new label
+        if hasattr(dataset, 'targets'):
+            dataset.targets[idx] = torch.tensor(new_label, dtype=original_targets.dtype)
+        elif isinstance(dataset, TensorDataset):
+            dataset.tensors[1][idx] = torch.tensor(new_label, dtype=original_targets.dtype)
+
+    return noisy_indices.tolist()
 
 
-def load_data_and_normalize(dataset_name: str, subset_size: int, noise_rate: float = 0.0) -> TensorDataset:
+def load_data_and_normalize(dataset_name: str, subset_size: int) -> TensorDataset:
     """ Used to load the data from common datasets available in torchvision, and normalize them. The normalization
     is based on the mean and std of a random subset of the dataset of the size subset_size.
 
-    :param dataset_name: name of the dataset to load. It has to be available in torchvision.datasets
+    :param dataset_name: name of the dataset to load. It has to be available in `torchvision.datasets`
     :param subset_size: used when not working on the full dataset - the results will be less reliable, but the
     complexity will be lowered
-    :param noise_rate: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
     :return: random, normalized subset of dataset_name of size subset_size with (noise_rate*subset_size) labels changed
     to introduce label noise
     """
@@ -74,9 +76,6 @@ def load_data_and_normalize(dataset_name: str, subset_size: int, noise_rate: flo
                                                     transform=transforms.ToTensor())
     test_dataset = getattr(datasets, dataset_name)(root="./data", train=False, download=True,
                                                    transform=transforms.ToTensor())
-    # Add label noise
-    introduce_label_noise(train_dataset, noise_rate)
-    introduce_label_noise(test_dataset, noise_rate)
     # Concatenate train and test datasets
     full_data = torch.cat([train_dataset.data.unsqueeze(1).float(), test_dataset.data.unsqueeze(1).float()])
     full_targets = torch.cat([train_dataset.targets, test_dataset.targets])
@@ -107,22 +106,36 @@ def transform_datasets_to_dataloaders(dataset: TensorDataset) -> DataLoader:
     """
     loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
     for data, target in loader:
-        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=True)
+        loader = DataLoader(TensorDataset(data, target), batch_size=len(data), shuffle=False)
     return loader
 
 
-def initialize_model() -> Tuple[SimpleNN, SGD]:
+def initialize_model(latent: int = 1, evaluation_network: str = 'SimpleNN',
+                     dataset: str = 'MNIST') -> Tuple[SimpleNN, SGD]:
     """ Used to initialize the model and optimizer.
 
+    :param latent: the index of the hidden layer used to extract the latent representation for radii computations
+    :param evaluation_network: specifies the type of network to initialize
+    :param dataset: specifies which dataset will the model be trained on (needed to set input & output layer)
     :return: initialized SimpleNN model and SGD optimizer
     """
-    model = SimpleNN(28 * 28, 2, 20, 1)
-    optimizer = SGD(model.parameters(), lr=0.1)
+    if evaluation_network == 'SimpleNN':
+        if dataset in ['MNIST', 'FashionMNIST', 'KMNIST']:
+            model = SimpleNN(28 * 28, 2, 20, latent)
+        else:
+            model = SimpleNN(3*32*32, 8, 30, latent)
+        optimizer = SGD(model.parameters(), lr=0.1)
+    else:
+        if dataset in ['MNIST', 'FashionMNIST', 'KMNIST']:
+            model = ResNet(img_channels=1, num_layers=18, block=BasicBlock, num_classes=10)
+        else:
+            model = ResNet(img_channels=3, num_layers=18, block=BasicBlock, num_classes=10)
+        optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-2)
     model.to(DEVICE)
     return model, optimizer
 
 
-def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
+def train_model(model: Union[SimpleNN, ResNet], loader: DataLoader, optimizer: Union[SGD, Adam],
                 compute_radii: bool = True) -> List[Tuple[int, Dict[int, torch.Tensor]]]:
     """
 
@@ -151,7 +164,8 @@ def train_model(model: SimpleNN, loader: DataLoader, optimizer: SGD,
     return epoch_radii
 
 
-def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD) -> Dict[int, Union[SimpleNN, None]]:
+def train_stop_at_inversion(model: SimpleNN, loader: DataLoader,
+                            optimizer: SGD) -> Tuple[Dict[int, SimpleNN], Dict[int, int]]:
     """ Train a model and monitor the radii of class manifolds. When an inversion point is identified for a class, save
     the current state of the model to the 'model' list that is returned by this function.
 
@@ -163,6 +177,7 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
     """
     prev_radii, models = {class_idx: torch.tensor(float('inf')) for class_idx in range(10)}, {}
     found_classes = set()  # Keep track of classes for which the inversion point has already been found.
+    inversion_points = {}
     for epoch in range(EPOCHS):
         model.train()
         for data, target in loader:
@@ -182,8 +197,12 @@ def train_stop_at_inversion(model: SimpleNN, loader: DataLoader, optimizer: SGD)
                 if key not in models.keys() and current_radii[key] > prev_radii[key] and epoch > 20:
                     models[key] = model.to(DEVICE)
                     found_classes.add(key)
+                    inversion_points[key] = epoch
             prev_radii = current_radii
-    return models
+        if set(models.keys()) == set(range(10)):
+            break
+    print(f'The following are the epochs of inversion_points per class - {inversion_points}')
+    return models, inversion_points
 
 
 def select_stragglers_dataset_level(results: List[Tuple[int, float]], num_stragglers: int,
@@ -216,9 +235,11 @@ def select_stragglers_class_level(results: List[Tuple[int, float]], stragglers_p
     """
     targets = [label for _, label in dataset]
     class_results = {i: [] for i in range(10)}
-    for idx, score, correct in results:
+    # Sort the results based on the prediction class
+    for idx, score in results:
         class_label = targets[idx]  # Use the passed targets list/tensor
-        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score, correct))
+        class_results[class_label.item() if hasattr(class_label, 'item') else class_label].append((idx, score))
+    # Extract most uncertain samples on a class-level
     stragglers_indices = []
     for class_label, class_result in class_results.items():
         class_result.sort(key=lambda x: x[1], reverse=(strategy == 'energy'))
@@ -227,13 +248,23 @@ def select_stragglers_class_level(results: List[Tuple[int, float]], stragglers_p
     return stragglers_indices
 
 
-def calculate_energy(logits: Tensor, temperature: float = 1.0) -> Tensor:
-    # Calculate the energy score based on logits
+def calculate_energy(logits: Tensor, targets: Tensor, level: str, temperature: float = 1.0) -> Tensor:
+    if level == 'class':
+        # Compute energy for each class individually
+        unique_classes = targets.unique()
+        class_energies = torch.empty(size=(len(logits),), dtype=logits.dtype, device=logits.device)
+        for class_label in unique_classes:
+            class_mask = (targets == class_label)
+            class_logits = logits[class_mask]
+            # Calculate class-specific energy
+            class_energies[class_mask] = -temperature * torch.logsumexp(class_logits / temperature, dim=1)
+        return class_energies
     return -temperature * torch.logsumexp(logits / temperature, dim=1)
 
 
 def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: TensorDataset, stragglers: List[int],
-                                              strategy: str, level: str) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+                                              strategy: str,
+                                              level: str) -> Tuple[Tensor, Tensor, Tensor, Tensor, List[Tensor]]:
     """ This function divides the 'dataset' into hard and easy samples using either confidence- or energy-based method.
 
     :param gt_indices: list of noisy-label indices (gt stands for ground truth)
@@ -242,14 +273,10 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
     for confidence- and energy-based methods)
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
-    :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
-    :return: tuple containing the identified hard and easy samples
+    :param level: specifies the level at which the energy is computed; it also affects how the hard samples are chose
+    (is it class- or dataset-level); only 'dataset' and 'class' allowed
+    :return: tuple containing the identified hard and easy samples together with the indices of hard samples
     """
-    # TODO: Add Cross-Validation. Make computation of energy and confidence truly class-level (when strategy == 'class')
-    if strategy not in ["confidence", "energy"]:
-        raise ValueError(f"The mode parameter must be 'confidence' or 'energy'; {strategy} is not allowed.")
-    if level not in ['dataset', 'class']:
-        raise ValueError(f"The level parameter must be 'dataset' or 'class'; {level} is not allowed.")
     # Initialize necessary variables and models before training
     hard_data, hard_target, easy_data, easy_target, results, total_hard_indices = [], [], [], [], [], []
     model, optimizer = initialize_model()
@@ -264,8 +291,8 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
             data, target = data.to(DEVICE), target.to(DEVICE)
             output = model(data)
             if strategy == 'energy':
-                energy = calculate_energy(output).cpu().numpy()
-                results.extend(list(zip(range(len(dataset)), energy,)))
+                energy = calculate_energy(output, target, level).cpu().numpy()
+                results.extend(list(zip(range(len(dataset)), energy)))
             else:
                 confidence = output.max(1)[0].cpu().numpy()
                 results.extend(list(zip(range(len(dataset)), confidence)))
@@ -274,6 +301,11 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
         stragglers_indices = select_stragglers_dataset_level(results, sum(stragglers), strategy)
     else:  # level == 'class'
         stragglers_indices = select_stragglers_class_level(results, stragglers, strategy, dataset)
+    class_indices = {i: [] for i in range(10)}
+    for idx in stragglers_indices:
+        label = dataset[idx][1].item()  # Assuming label is a tensor, use .item() to get its value
+        class_indices[label].append(idx)
+    class_indices = [torch.tensor(class_indices[i], dtype=torch.int) for i in range(10)]
     total_hard_indices.extend(stragglers_indices)
     for idx in stragglers_indices:
         hard_data.append(dataset[idx][0])
@@ -287,7 +319,8 @@ def identify_hard_samples_with_model_accuracy(gt_indices: List[int], dataset: Te
         accuracy = len(set(total_hard_indices).intersection(gt_indices)) / len(gt_indices) * 100
         print(f'Correctly guessed {accuracy}% of label noise '
               f'({len(set(total_hard_indices).intersection(gt_indices))} out of {len(gt_indices)}).')
-    return torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target)
+    return torch.stack(hard_data), torch.tensor(hard_target), torch.stack(easy_data), torch.tensor(easy_target), \
+        class_indices
 
 
 def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noise_ratio: float) -> List[Tensor]:
@@ -296,12 +329,14 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     :param strategy: specifies the strategy used for identifying hard samples; only 'stragglers', 'confidence' and
     'energy' allowed
     :param dataset: TensorDataset that contains the data to be divided into easy and hard samples
-    :param level: specifies the level at which confidence and energy are computed; only 'dataset' and 'class' allowed
-    :param noise_ratio: the ratio of the added label noise; used for confidence- and energy-based methods
-    :return: list containing the identified hard and easy samples
+    :param level: specifies the level at which the energy is computed and how the hard samples are chosen; only
+    'dataset' and 'class' allowed
+    :param noise_ratio: used when adding label noise to the dataset. Make sure that noise_ratio is in range of [0, 1)
+    :return: list containing the identified hard and easy samples with the indices of hard samples
     """
-    # TODO: check how many noisy-labels straggler-based approach identified (so far we assume that the increase in
-    #  straggler count comes from correctly identified noisy-labels, which might not be correct)
+    noisy_indices = []
+    if strategy == 'stragglers':
+        noisy_indices = introduce_label_noise(dataset, noise_ratio)
     loader = transform_datasets_to_dataloaders(dataset)
     model, optimizer = initialize_model()
     # The following are used to store all stragglers and non-stragglers
@@ -310,12 +345,12 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     easy_data = torch.tensor([], dtype=torch.float32).to(DEVICE)
     easy_target = torch.tensor([], dtype=torch.long).to(DEVICE)
     # Look for inversion point for each class manifold
-    models = train_stop_at_inversion(model, loader, optimizer)
+    models, _ = train_stop_at_inversion(model, loader, optimizer)
     # Check if stragglers for all classes were found. If not repeat the search
     if set(models.keys()) != set(range(10)):
         print('Have to restart because not all stragglers were found.')
-        return identify_hard_samples(strategy, dataset, level, noise_ratio)
-    # The following is used to know the distribution of stragglers between classes
+        return identify_hard_samples(strategy, dataset, level, 0.0)
+    # This is used to know the distribution of stragglers between classes
     stragglers = [torch.tensor(False) for _ in range(10)]
     # Iterate through all data samples in 'loader' and divide them into stragglers/non-stragglers
     for data, target in loader:
@@ -329,20 +364,28 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
             hard_target = torch.cat((hard_target, target[stragglers[class_idx]]), dim=0)
             easy_data = torch.cat((easy_data, data[current_non_stragglers]), dim=0)
             easy_target = torch.cat((easy_target, target[current_non_stragglers]), dim=0)
+    if len(noisy_indices) > 0:
+        combined_stragglers = torch.any(torch.stack(stragglers), dim=0)
+        straggler_indices = set(torch.where(combined_stragglers)[0].cpu().tolist())
+        accuracy = len(straggler_indices.intersection(noisy_indices)) / len(noisy_indices) * 100
+        print(print(f'Correctly guessed {accuracy:.2f}% of label noise '
+              f'({len(set(straggler_indices).intersection(noisy_indices))} out of {len(noisy_indices)}).'))
     # Compute the class-level number of stragglers
-    stragglers = [int(tensor.sum().item()) for tensor in stragglers]
-    print(f'Found {sum(stragglers)} stragglers.')
+    aggregated_stragglers = [int(tensor.sum().item()) for tensor in stragglers]
+    stragglers = [torch.where(tensor)[0] for tensor in stragglers]
+    print(f'Found {sum(aggregated_stragglers)} stragglers.')
     if strategy in ["confidence", "energy"]:
         # Introduce noise and increase the threshold for confidence- and energy-based methods
-        indices = introduce_label_noise(dataset, noise_ratio)
-        print(f'Poisoned {len(indices)} labels.')
-        for class_idx in range(len(stragglers)):
-            stragglers[class_idx] = stragglers[class_idx] + int(noise_ratio * len(dataset) / len(stragglers))
-        print(f'Hence, now the method should find {sum(stragglers)} stragglers.')
+        noisy_indices = introduce_label_noise(dataset, noise_ratio)
+        print(f'Poisoned {len(noisy_indices)} labels.')
+        for class_idx in range(len(aggregated_stragglers)):
+            aggregated_stragglers[class_idx] = aggregated_stragglers[class_idx] + \
+                                               int(noise_ratio * len(dataset) / len(aggregated_stragglers))
+        print(f'Hence, now the method should find {sum(aggregated_stragglers)} stragglers.')
         # Identify hard an easy samples using confidence- or energy-based method
-        hard_data, hard_target, easy_data, easy_target = (
-            identify_hard_samples_with_model_accuracy(indices, dataset, stragglers, strategy, level))
-    return [hard_data, hard_target, easy_data, easy_target]
+        hard_data, hard_target, easy_data, easy_target, stragglers = (
+            identify_hard_samples_with_model_accuracy(noisy_indices, dataset, aggregated_stragglers, strategy, level))
+    return [hard_data, hard_target, easy_data, easy_target, stragglers]
 
 
 def create_dataloaders_with_straggler_ratio(hard_data: Tensor, easy_data: Tensor, hard_target: Tensor,
@@ -405,7 +448,7 @@ def create_dataloaders_with_straggler_ratio(hard_data: Tensor, easy_data: Tensor
     return train_loader, test_loaders
 
 
-def test(model: SimpleNN, loader: DataLoader) -> float:
+def test(model: SimpleNN, loader: DataLoader) -> dict[str, float]:
     """ Measures the accuracy of the 'model' on the test set.
 
     :param model: model, which performance we want to evaluate
@@ -413,20 +456,33 @@ def test(model: SimpleNN, loader: DataLoader) -> float:
     :return: accuracy on the test set rounded to 2 decimal places
     """
     model.eval()
-    correct, total = 0, 0
+    num_classes = 10
+    # Initialize metrics
+    accuracy = Accuracy(task="multiclass", num_classes=10).to(DEVICE)
+    precision = Precision(task="multiclass", num_classes=num_classes, average='macro').to(DEVICE)
+    recall = Recall(task="multiclass", num_classes=num_classes, average='macro').to(DEVICE)
+    f1_score = F1Score(task="multiclass", num_classes=num_classes, average='macro').to(DEVICE)
     with torch.no_grad():
         for data, target in loader:
             data, target = data.to(DEVICE), target.to(DEVICE)
             outputs = model(data)
-            _, predicted = torch.max(outputs.data, 1)
-            total += target.size(0)
-            correct += (predicted == target).sum().item()
-    return round(100 * correct / total, 2)
+            # Update metrics
+            accuracy.update(outputs, target)
+            precision.update(outputs, target)
+            recall.update(outputs, target)
+            f1_score.update(outputs, target)
+    # Compute final results
+    accuracy_result = round(accuracy.compute().item() * 100, 2)
+    precision_result = round(precision.compute().item() * 100, 2)
+    recall_result = round(recall.compute().item() * 100, 2)
+    f1_result = round(f1_score.compute().item() * 100, 2)
+    return {'accuracy': accuracy_result, 'precision': precision_result, 'recall': recall_result, 'f1': f1_result}
 
 
 def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, easy_data: Tensor, easy_target: Tensor,
                                       train_ratio: float, reduce_hard: bool, remaining_train_ratios: List[float],
-                                      current_accuracies: Dict[str, Dict[float, List]]):
+                                      current_metrics: Dict[str, Dict[float, Dict[str, List]]],
+                                      evaluation_network: str):
     """ In this function we want to measure the effect of changing the number of easy/hard samples on the accuracy on
     the test set for distinct train:test ratio (where train:test ratio is passed as a parameter). The experiments are
     repeated multiple times to ensure that they are initialization-invariant.
@@ -440,25 +496,32 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
     hard (True) samples
     :param remaining_train_ratios: list of ratios of easy/hard samples remaining in the train set (0.1 means that 90% of
     hard samples were removed from the train set before training, when reduce_hard == True)
-    :param current_accuracies: used to save accuracies to the outer scope
+    :param current_metrics: used to save accuracies, precision, recall and f1-score to the outer scope
+    :param evaluation_network: this network will be used to measure the performance on hard/easy data
     """
     generalisation_settings = ['full', 'hard', 'easy']
     for remaining_train_ratio in remaining_train_ratios:
-        accuracies_for_ratio = [[], [], []]  # Store accuracies for the current ratio across different initializations
+        metrics_for_ratio = {metric: [[], [], []] for metric in ['accuracy', 'precision', 'recall', 'f1']}
         train_loader, test_loaders = create_dataloaders_with_straggler_ratio(hard_data, easy_data, hard_target,
                                                                              easy_target, train_ratio,
                                                                              reduce_hard, remaining_train_ratio)
         # We train multiple times to make sure that the performance is initialization-invariant
-        for _ in range(3):
-            model, optimizer = initialize_model()
+        for _ in range(5):
+            model, optimizer = initialize_model(evaluation_network=evaluation_network)
             train_model(model, train_loader, optimizer, False)
             # Evaluate the model on test set
             for i in range(3):
-                accuracy = test(model, test_loaders[i])
-                accuracies_for_ratio[i].append(accuracy)
+                metrics = test(model, test_loaders[i])
+                for metric_name, metric_values in metrics.items():
+                    metrics_for_ratio[metric_name][i].append(metric_values)
         # Save the accuracies to the outer scope (outside of this function)
-        for i in range(3):
-            current_accuracies[generalisation_settings[i]][remaining_train_ratio].extend(accuracies_for_ratio[i])
+        for i, setting in enumerate(generalisation_settings):
+            for metric_name in metrics_for_ratio:
+                if setting not in current_metrics:
+                    current_metrics[setting] = {}
+                if remaining_train_ratio not in current_metrics[setting]:
+                    current_metrics[setting][remaining_train_ratio] = {metric: [] for metric in metrics_for_ratio}
+                current_metrics[setting][remaining_train_ratio][metric_name].extend(metrics_for_ratio[metric_name][i])
 
 
 def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], dataset_name: str, save: bool = False):
@@ -474,7 +537,7 @@ def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], datas
     for run_index in range(len(all_radii)):
         radii = all_radii[run_index]
         for i, ax in enumerate(axes.flatten()):
-            y = [radii[j][1][i] for j in range(len(radii))]
+            y = [radii[j][1][i].cpu() for j in range(len(radii))]
             x = [radii[j][0] for j in range(len(radii))]
             ax.plot(x, y, color=colors[run_index], linewidth=3)
             if run_index == 0:
@@ -486,33 +549,3 @@ def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], datas
     if save:
         plt.savefig(f'Figures/radii_on_{dataset_name}.png')
         plt.savefig(f'Figures/radii_on_{dataset_name}.pdf')
-
-
-def plot_generalisation(train_ratios: list[float], remaining_train_ratios: list[float], reduce_hard: bool,
-                        avg_accuracies: Dict[str, Dict[float, List[float]]], strategy: str, level: str,
-                        std_accuracies: Dict[str, Dict[float, List[float]]], noise_ratio: float, dataset_name: str):
-    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(train_ratios)))
-    for setting in ['full', 'hard', 'easy']:
-        for idx in range(len(train_ratios)):
-            ratio = train_ratios[idx]
-            plt.errorbar(remaining_train_ratios, avg_accuracies[setting][ratio], marker='o', markersize=5,
-                         yerr=std_accuracies[setting][ratio], capsize=5, linewidth=2, color=colors[idx],
-                         label=f'Training:Test={int(100 * ratio)}:{100 - int(100 * ratio)}')
-        plt.xlabel(f'Proportion of {["Easy", "Hard"][reduce_hard]} Samples Remaining in Training Set', fontsize=14)
-        plt.ylabel(f'Accuracy on {setting.capitalize()} Test Set (%)', fontsize=14)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        plt.grid(True)
-        plt.legend(title='Training:Test Ratio')
-        plt.tight_layout()
-        # Generate a title for the figure
-        s = ''
-        if strategy != 'stragglers':
-            s = f'{level}_'
-        plt.savefig(
-            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
-            f'{strategy}_{noise_ratio}noise.png')
-        plt.savefig(
-            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
-            f'{strategy}_{noise_ratio}noise.pdf')
-        plt.clf()
