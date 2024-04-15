@@ -373,8 +373,9 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
     # Compute the class-level number of stragglers
     aggregated_stragglers = [int(tensor.sum().item()) for tensor in stragglers]
     stragglers = [torch.where(tensor)[0] for tensor in stragglers]
-    print(f'Found {sum(aggregated_stragglers)} stragglers.')
+    print(f'Found {sum(aggregated_stragglers)} stragglers ({len(hard_data)} hard samples).')
     if strategy in ["confidence", "energy"]:
+        saved_rng_state = torch.get_rng_state()
         # Introduce noise and increase the threshold for confidence- and energy-based methods
         noisy_indices = introduce_label_noise(dataset, noise_ratio)
         print(f'Poisoned {len(noisy_indices)} labels.')
@@ -385,6 +386,8 @@ def identify_hard_samples(strategy: str, dataset: TensorDataset, level: str, noi
         # Identify hard an easy samples using confidence- or energy-based method
         hard_data, hard_target, easy_data, easy_target, stragglers = (
             identify_hard_samples_with_model_accuracy(noisy_indices, dataset, aggregated_stragglers, strategy, level))
+        torch.set_rng_state(saved_rng_state)
+    print(f'Found {sum(aggregated_stragglers)} stragglers ({len(hard_data)} hard samples).')
     return [hard_data, hard_target, easy_data, easy_target, stragglers]
 
 
@@ -549,3 +552,33 @@ def plot_radii(all_radii: List[List[Tuple[int, Dict[int, torch.Tensor]]]], datas
     if save:
         plt.savefig(f'Figures/radii_on_{dataset_name}.png')
         plt.savefig(f'Figures/radii_on_{dataset_name}.pdf')
+
+
+def plot_generalisation(train_ratios: list[float], remaining_train_ratios: list[float], reduce_hard: bool,
+                        avg_accuracies: Dict[str, Dict[float, List[float]]], strategy: str, level: str,
+                        std_accuracies: Dict[str, Dict[float, List[float]]], noise_ratio: float, dataset_name: str):
+    colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(train_ratios)))
+    for setting in ['full', 'hard', 'easy']:
+        for idx in range(len(train_ratios)):
+            ratio = train_ratios[idx]
+            plt.errorbar(remaining_train_ratios, avg_accuracies[setting][ratio], marker='o', markersize=5,
+                         yerr=std_accuracies[setting][ratio], capsize=5, linewidth=2, color=colors[idx],
+                         label=f'Training:Test={int(100 * ratio)}:{100 - int(100 * ratio)}')
+        plt.xlabel(f'Proportion of {["Easy", "Hard"][reduce_hard]} Samples Remaining in Training Set', fontsize=14)
+        plt.ylabel(f'Accuracy on {setting.capitalize()} Test Set (%)', fontsize=14)
+        plt.xticks(fontsize=12)
+        plt.yticks(fontsize=12)
+        plt.grid(True)
+        plt.legend(title='Training:Test Ratio')
+        plt.tight_layout()
+        # Generate a title for the figure
+        s = ''
+        if strategy != 'stragglers':
+            s = f'{level}_'
+        plt.savefig(
+            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
+            f'{strategy}_{noise_ratio}noise.png')
+        plt.savefig(
+            f'Figures/generalisation_from_{["easy", "hard"][reduce_hard]}_to_{setting}_on_{dataset_name}_using_{s}'
+            f'{strategy}_{noise_ratio}noise.pdf')
+        plt.clf()
