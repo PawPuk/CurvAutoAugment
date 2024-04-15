@@ -484,7 +484,7 @@ def test(model: SimpleNN, loader: DataLoader) -> dict[str, float]:
 
 def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, easy_data: Tensor, easy_target: Tensor,
                                       train_ratio: float, reduce_hard: bool, remaining_train_ratios: List[float],
-                                      current_metrics: Dict[str, Dict[float, Dict[str, List]]],
+                                      current_metrics: Dict[str, Dict[float, Dict[str, List]]], runs: int,
                                       evaluation_network: str):
     """ In this function we want to measure the effect of changing the number of easy/hard samples on the accuracy on
     the test set for distinct train:test ratio (where train:test ratio is passed as a parameter). The experiments are
@@ -500,6 +500,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
     :param remaining_train_ratios: list of ratios of easy/hard samples remaining in the train set (0.1 means that 90% of
     hard samples were removed from the train set before training, when reduce_hard == True)
     :param current_metrics: used to save accuracies, precision, recall and f1-score to the outer scope
+    :param runs: specifies how many networks will be trained per setting
     :param evaluation_network: this network will be used to measure the performance on hard/easy data
     """
     generalisation_settings = ['full', 'hard', 'easy']
@@ -509,7 +510,7 @@ def straggler_ratio_vs_generalisation(hard_data: Tensor, hard_target: Tensor, ea
                                                                              easy_target, train_ratio,
                                                                              reduce_hard, remaining_train_ratio)
         # We train multiple times to make sure that the performance is initialization-invariant
-        for _ in range(5):
+        for _ in range(runs):
             model, optimizer = initialize_model(evaluation_network=evaluation_network)
             train_model(model, train_loader, optimizer, False)
             # Evaluate the model on test set

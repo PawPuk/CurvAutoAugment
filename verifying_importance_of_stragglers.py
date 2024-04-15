@@ -5,7 +5,7 @@ from typing import List
 import torch
 import tqdm
 
-from utils import load_data_and_normalize, identify_hard_samples, straggler_ratio_vs_generalisation
+from utils import load_data_and_normalize, identify_hard_samples, plot_generalisation, straggler_ratio_vs_generalisation
 
 
 def main(dataset_name: str, strategy: str, runs: int, train_ratios: List[float],
@@ -24,7 +24,7 @@ def main(dataset_name: str, strategy: str, runs: int, train_ratios: List[float],
                                                                                                  level, noise_ratio)
             print(f'A total of {len(hard_data)} hard samples and {len(easy_data)} easy samples were found.')
             straggler_ratio_vs_generalisation(hard_data, hard_target, easy_data, easy_target, train_ratio, reduce_hard,
-                                              remaining_train_ratios, current_metrics, evaluation_network)
+                                              remaining_train_ratios, current_metrics, runs, evaluation_network)
             hard_indices = [h_index.cpu() for h_index in hard_indices] if torch.cuda.is_available() else hard_indices
             indices_of_hard_samples.append(hard_indices)
         # After each train_ratio, add the collected metrics to the all_metrics dictionary
