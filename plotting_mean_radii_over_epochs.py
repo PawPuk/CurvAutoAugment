@@ -45,8 +45,8 @@ def plot_mean_std_radii(mean_radii, std_radii, dataset_name):
 
     plt.suptitle(f'Radii Development Over Epochs for {dataset_name}')
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(f'Figures/mean_std_radii_on_{dataset_name}.png')
-    plt.savefig(f'Figures/mean_std_radii_on_{dataset_name}.pdf')
+    plt.savefig(f'Figures/Figure 2/mean_std_radii_on_{dataset_name}.png')
+    plt.savefig(f'Figures/Figure 2/mean_std_radii_on_{dataset_name}.pdf')
     plt.show()
 
 

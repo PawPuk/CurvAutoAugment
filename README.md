@@ -4,9 +4,10 @@
 
 The [replicate_inversion_results_on_multiple_classes.py](replicate_inversion_results_on_multiple_classes.py) program 
 generalizes the approach introduced by [Ciceri et al. (2024)](https://www.nature.com/articles/s42256-023-00772-9) to
-multiclass classification. The program trains 5 models with different initialization and computes the evolution of the 
-radii of class manifolds over epochs, plotting the results for visualization. The results prove the generalizability of
-the 'inversion point' to multiclass classification, albeit with an emergence of class-specific characteristics.
+multiclass classification. The program trains a specified number of models (default to 100) with different 
+initialization and computes the evolution of the radii of class manifolds over epochs, plotting the results for 
+visualization. The results prove the generalizability of the 'inversion point' to multiclass classification, albeit 
+with an emergence of class-specific characteristics.
 
 ## Requirements
 
@@ -29,7 +30,7 @@ To run [replicate_inversion_results_on_multiple_classes.py](replicate_inversion_
 the following command in your terminal:
 
 ```bash
-python replicate_inversion_results_on_multiple_classes.py --dataset_name [DATASET_NAME] --subset_size [SUBSET_SIZE]
+python replicate_inversion_results_on_multiple_classes.py --dataset_name [DATASET_NAME] --subset_size [SUBSET_SIZE] --number_of_runs [NUMBER_OF_RUNS]
 ```
 
 ### Parameters
@@ -38,16 +39,29 @@ python replicate_inversion_results_on_multiple_classes.py --dataset_name [DATASE
 `torchvision.datasets`. Currently, the code only works for single-colour datasets. **Default value is `MNIST`.**
 - `--subset_size`: Integer specifying the size of the dataset subset to use for training and analysis. This allows for 
 quicker iterations during experimentation. **Default value is `20000`.** Actual experiments were conducted on `70000`.
+- `--number_of_runs`: Integer specifying how many times the experiment will be rerun. We use 100 runs by default but 
+the user is free to adjust it
 
 ## Expected Results
 
-When running `python replicate_inversion_results_on_multiple_classes.py --dataset_name MNIST --subset_size 20000`, the 
+When running `python replicate_inversion_results_on_multiple_classes.py`, the 
 following result is observed:
 
 ![Radii Evolution Over Epochs on MNIST](Figures/radii_on_MNIST.png)
 
-The results will differ each time due to the random initialization, however the existence of the inversion point should
-be still verifiable, even when the `--subset_size` is reduced to `20000`.
+This figure looks very chaotic when `number_of_runs` is larger than 5 (as can be seen above). Because of that we have 
+also prepared `plotting_mean_radii_over_epochs.py` to display average results (see the Figure below). This function 
+uses the data saved by `plotting_mean_radii_over_epochs.py` in lines 19-20. To run it use the following command: 
+`python plotting_mean_radii_over_epochs.py`. Note that the Algorithm 1 from Appendix B describes the `train_model` 
+function from the `utils.py` file. The code that computes the radii of class manifolds is a modified version of 
+https://github.com/marco-gherardi/stragglers. The projection of class manifolds, mentioned in our paper, happens in 
+line 36 of `neural_networks.py`.
+
+![Radii Evolution Over Epochs on MNIST](Figures/Figure%202/mean_std_radii_on_MNIST.png)
+
+All our experiments were performed on random subset of the used datasets (see `load_data_and_normalize` function in 
+`utils.py`) with 20,000 data samples. Running those experiments on the whole dataset does not bring a significant 
+change, but greatly increases the time necessary to run the experiment.
 
 # Sections 4-5: In-class Data Imbalance & Benchmarking Hard Sample Identification Methods
 
@@ -69,7 +83,7 @@ To run [verifying_importance_of_stragglers.py](verifying_importance_of_straggler
 the following command in your terminal:
 
 ```bash
-python verifying_importance_of_stragglers.py --dataset_name [DATASET_NAME] --strategy [STRATEGY] --train_ratios [TRAIN_RATIOS] --remaining_train_ratios [REMAINING_TRAIN_RATIOS] --reduce_hard [REDUCE_HARD] --level [LEVEL] --noise_ratio [NOISE_RATIO] --subset_size [SUBSET_SIZE]
+python verifying_importance_of_stragglers.py --dataset_name [DATASET_NAME] --strategy [STRATEGY] --runs [RUNS] --train_ratios [TRAIN_RATIOS] --remaining_train_ratios [REMAINING_TRAIN_RATIOS] --reduce_hard [REDUCE_HARD] --level [LEVEL] --noise_ratio [NOISE_RATIO] --subset_size [SUBSET_SIZE] --evaluation_network [EVAULATION_NETWORK]
 ```
 
 ## Parameters
