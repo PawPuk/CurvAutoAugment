@@ -47,6 +47,7 @@ def plot_accuracy_deviations(mean_accuracies, std_accuracies, dataset_name, over
     plt.tight_layout()
     ax.grid(True, linestyle='--', which='both', alpha=0.7)
     plt.savefig(f'Figures/class_level_{["non", ""][overfit]}overfit_accuracies_on_{subset_size}_{dataset_name}.pdf')
+    plt.savefig(f'Figures/class_level_{["non", ""][overfit]}overfit_accuracies_on_{subset_size}_{dataset_name}.png')
     plt.show()
 
 

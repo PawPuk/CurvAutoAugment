@@ -155,8 +155,6 @@ and hard samples (obtained via straggler-based hard sample identifier) from the 
 easy samples in the training set. All this information is visible in the Figure below that is produced by 
 `verifying_importance_of_stragglers.py` and saved in the Figures folder.
 
-![In-class Imbalance on MNIST - Generalization to Full, Hard and Easy Test Set](Figures/radii_on_MNIST.pdf)
-
 In order to replicate all the results necessary to obtain Figures 3 and 4 from our paper you need to run all the 
 following:
 
@@ -188,12 +186,24 @@ by different methods.
 
 ### Measuring class-level distribution of hard samples
 
+All the necessary information to compute the distribution of hard samples between classes is available in the 
+`*_indices.pkl` files produces by `verifying_importance_of_stragglers.py`. Those files contain the indices of the hard 
+samples found using different hard sample identifiers. Simply run `python3 hard_sample_distribution_over_classes.py` 
+after you have generated those .pkl files. This will produce the following Figure (see below) in the `Figures/Figure 8` 
+folder. The program has two parameters - `--dataset_name` and `--strategy` and they have the same meaning as in
+`verifying_importance_of_stragglers.py`. If you want to see the distribution of hard samples between classes on KMNIST
+simply change the `--dataset_name` parameter.
+
+![Hard Sample Distribution Among Classes on MNIST](Figures/Figure 8/a%20hard_sample_distribution_stragglers_MNIST.png)
+
+We believe that the distribution of hard samples is correlated to the class-level accuracy. We measure it below.
 The idea is fairly simple - train `--runs` networks, each with distinct initialization, on a specified dataset (we use 
 the same training hyperparameters as in earlier experiments), and measure class-level test accuracy. Afterward, present
 mean and std in a form of a bar chart. Below is an example of the result that we get after running: 
-`python3 class_level_accuracies.py --dataset_name MNIST --subset_size 70000`
+`python3 class_level_accuracies.py --dataset_name MNIST --subset_size 70000`. The correlation between the two figures 
+is very apparent (The Pearson correlation coefficient is equal to 0.95).
 
-![Class Level Accuracies on MNIST](Figures/Figure 8/d%20class_level_accuracies_MNIST.png)
+![Class Level Accuracies on MNIST](Figures/Figure 8/d%20class_level_nonoverfit_accuracies_on_70000_MNIST.png)
 
 #### Parameters
 
@@ -206,5 +216,5 @@ which case don't call this flag), or train on the entire dataset, as we used to 
 ### Measuring overlap between hard samples obtained via different methods
 
 Here we use the information gathered in the `Results/F1_results/MNIST_{strategy}_False_20000_indices.pkl` files produced
-by `verifying_importance_of_stragglers.py`. Those files contain the indices of the hard samples found using different 
-hard sample identifiers. After running `python3 compute_overlap.py` the overlap is being printed in the console.
+by `verifying_importance_of_stragglers.py`. After running `python3 compute_overlap.py` the overlap is being printed in 
+the console.
