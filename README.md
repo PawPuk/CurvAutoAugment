@@ -176,7 +176,7 @@ This will gather all the information necessary to produce Figure 7. In order to 
 `python3 plotting_results.py`. The resulting Figures are saved in `Figures/Figure 7/`. Below we show one of the produced 
 figures (7a)
 
-![Generalization (Accuracy) on MNIST when Varying the Amount of Easy Samples in the Training Set](Figures/Figure 7/a%20easy_accuracy.png)
+![Generalization (Accuracy) on MNIST when Varying the Amount of Easy Samples in the Training Set](Figures/Figure 7/a_easy_accuracy.png)
 
 # Further Experiments (Appendix E, Figure 8)
 
@@ -194,7 +194,7 @@ folder. The program has two parameters - `--dataset_name` and `--strategy` and t
 `verifying_importance_of_stragglers.py`. If you want to see the distribution of hard samples between classes on KMNIST
 simply change the `--dataset_name` parameter.
 
-![Hard Sample Distribution Among Classes on MNIST](Figures/Figure 8/a%20hard_sample_distribution_stragglers_MNIST.png)
+![Hard Sample Distribution Among Classes on MNIST](Figures/Figure 8/a_hard_sample_distribution_stragglers_MNIST.png)
 
 We believe that the distribution of hard samples is correlated to the class-level accuracy. We measure it below.
 The idea is fairly simple - train `--runs` networks, each with distinct initialization, on a specified dataset (we use 
@@ -203,7 +203,7 @@ mean and std in a form of a bar chart. Below is an example of the result that we
 `python3 class_level_accuracies.py --dataset_name MNIST --subset_size 70000`. The correlation between the two figures 
 is very apparent (The Pearson correlation coefficient is equal to 0.95).
 
-![Class Level Accuracies on MNIST](Figures/Figure 8/d%20class_level_nonoverfit_accuracies_on_70000_MNIST.png)
+![Class Level Accuracies on MNIST](Figures/Figure 8/d_class_level_nonoverfit_accuracies_on_70000_MNIST.png)
 
 #### Parameters
 
